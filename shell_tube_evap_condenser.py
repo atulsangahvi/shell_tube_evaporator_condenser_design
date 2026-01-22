@@ -5,17 +5,54 @@ import math
 from scipy.optimize import fsolve
 import plotly.graph_objects as go
 from typing import Dict, Tuple, List
+import warnings
+warnings.filterwarnings('ignore')
 
+# Page configuration
 st.set_page_config(
-    page_title="Shell & Tube HX Designer - Engineering Grade",
+    page_title="Shell & Tube Heat Exchanger Designer",
     page_icon="🌡️",
     layout="wide"
 )
 
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .section-header {
+        font-size: 1.5rem;
+        color: #1E3A8A;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #E5E7EB;
+    }
+    .result-box {
+        background-color: #F3F4F6;
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #3B82F6;
+    }
+    .warning-box {
+        background-color: #FEF3C7;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #F59E0B;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 class HeatExchangerDesign:
-    """Engineering-grade heat exchanger design with proper ε-NTU method"""
+    """Engineering-grade heat exchanger design with ε-NTU method"""
     
-    # Refrigerant properties (more comprehensive)
+    # Physical properties database
     REFRIGERANTS = {
         "R134a": {
             "cp_vapor": 0.85,  # kJ/kg·K at 5°C
@@ -43,6 +80,32 @@ class HeatExchangerDesign:
             "pr_vapor": 0.94,
             "pr_liquid": 4.26
         },
+        "R407C": {
+            "cp_vapor": 1.25,
+            "cp_liquid": 1.45,
+            "h_fg": 200.0,
+            "rho_vapor": 30.0,
+            "rho_liquid": 1150.0,
+            "mu_vapor": 1.25e-5,
+            "mu_liquid": 1.9e-4,
+            "k_vapor": 0.0125,
+            "k_liquid": 0.077,
+            "pr_vapor": 0.79,
+            "pr_liquid": 2.9
+        },
+        "R410A": {
+            "cp_vapor": 1.30,
+            "cp_liquid": 1.55,
+            "h_fg": 190.0,
+            "rho_vapor": 35.0,
+            "rho_liquid": 1120.0,
+            "mu_vapor": 1.1e-5,
+            "mu_liquid": 1.7e-4,
+            "k_vapor": 0.013,
+            "k_liquid": 0.076,
+            "pr_vapor": 0.81,
+            "pr_liquid": 2.7
+        },
         "Ammonia (R717)": {
             "cp_vapor": 2.18,
             "cp_liquid": 4.69,
@@ -58,312 +121,269 @@ class HeatExchangerDesign:
         }
     }
     
-    # Two-phase heat transfer correlations
-    TWO_PHASE_CORRELATIONS = {
-        "evaporator": {
-            "name": "Shah Correlation",
-            "formula": "h_tp = h_l * [(1 - x)^0.8 + 3.8*x^0.76*(1-x)^0.04/Pr_l^0.38]"
+    # Tube materials properties
+    TUBE_MATERIALS = {
+        "Copper": {
+            "k": 386,  # W/m·K
+            "density": 8960,  # kg/m³
+            "cost_factor": 1.0
         },
-        "condenser": {
-            "name": "Shah Correlation",
-            "formula": "h_tp = h_l * [(1 - x)^0.8 + 3.8*x^0.76*(1-x)^0.04/Pr_l^0.38]"
+        "Cu-Ni 90/10": {
+            "k": 40,  # W/m·K
+            "density": 8940,
+            "cost_factor": 1.8
+        },
+        "Steel": {
+            "k": 50,  # W/m·K
+            "density": 7850,
+            "cost_factor": 0.6
+        },
+        "Aluminum Brass": {
+            "k": 100,  # W/m·K
+            "density": 8300,
+            "cost_factor": 1.2
         }
+    }
+    
+    # Tube sizes (inches to meters)
+    TUBE_SIZES = {
+        "1/4\"": 0.00635,  # m
+        "3/8\"": 0.009525,  # m
+        "1/2\"": 0.0127,  # m
+        "5/8\"": 0.015875,  # m
+        "3/4\"": 0.01905,  # m
+        "1\"": 0.0254,  # m
+        "1.25\"": 0.03175,  # m
+        "1.5\"": 0.0381  # m
+    }
+    
+    # Glycol properties by percentage
+    GLYCOL_PROPERTIES = {
+        0: {"cp": 4.186, "rho": 998.2, "mu": 0.001, "k": 0.598, "pr": 7.01},
+        10: {"cp": 4.08, "rho": 1022, "mu": 0.0013, "k": 0.57, "pr": 9.3},
+        20: {"cp": 3.95, "rho": 1040, "mu": 0.0018, "k": 0.54, "pr": 13.2},
+        30: {"cp": 3.78, "rho": 1057, "mu": 0.0026, "k": 0.51, "pr": 19.3},
+        40: {"cp": 3.60, "rho": 1069, "mu": 0.0040, "k": 0.47, "pr": 30.6},
+        50: {"cp": 3.42, "rho": 1077, "mu": 0.0068, "k": 0.43, "pr": 54.1}
     }
     
     def __init__(self):
         self.results = {}
         
+    def calculate_water_glycol_properties(self, temperature: float, glycol_percentage: int) -> Dict:
+        """Calculate water/glycol mixture properties"""
+        base_props = self.GLYCOL_PROPERTIES.get(glycol_percentage, self.GLYCOL_PROPERTIES[0])
+        
+        # Temperature correction factors
+        temp_factor = 1 + 0.02 * (temperature - 20) / 50
+        
+        return {
+            "cp": base_props["cp"] * temp_factor * 1000,  # J/kg·K
+            "rho": base_props["rho"] / temp_factor,  # kg/m³
+            "mu": base_props["mu"] / temp_factor,  # Pa·s
+            "k": base_props["k"] * temp_factor,  # W/m·K
+            "pr": base_props["pr"] / temp_factor
+        }
+    
     def calculate_ntu_effectiveness(self, C_h: float, C_c: float, U: float, A: float, 
-                                  flow_arrangement: str, exchanger_type: str = "evaporator") -> Tuple[float, float]:
+                                  flow_arrangement: str, hex_type: str) -> Tuple[float, float]:
         """
         Calculate NTU and effectiveness using ε-NTU method
         
-        Args:
-            C_h: Hot fluid capacity rate (W/K)
-            C_c: Cold fluid capacity rate (W/K)
-            U: Overall heat transfer coefficient (W/m²K)
-            A: Heat transfer area (m²)
-            flow_arrangement: 'counter' or 'parallel'
-            exchanger_type: 'evaporator' or 'condenser'
-            
-        Returns:
-            NTU, effectiveness
+        For evaporators/condensers: C_r = 0 (phase change)
+        ε = 1 - exp(-NTU)
         """
-        # For evaporators/condensers, one fluid has C → ∞ (phase change)
-        if exchanger_type == "evaporator":
-            # Refrigerant evaporating (C → ∞), secondary fluid is C_min
-            C_min = min(C_c, C_h)
-            C_max = max(C_c, C_h)
-            C_r = C_min / C_max if C_max > 0 else 0
-            
-            # For phase change (C_r = 0)
-            NTU = U * A / C_min if C_min > 0 else 0
-            
-            if flow_arrangement == "counter" or flow_arrangement == "parallel":
-                # For C_r = 0 (phase change), ε = 1 - exp(-NTU)
-                effectiveness = 1 - math.exp(-NTU)
-            else:
-                effectiveness = 1 - math.exp(-NTU)
-                
-        elif exchanger_type == "condenser":
-            # Refrigerant condensing (C → ∞), secondary fluid is C_min
-            C_min = min(C_c, C_h)
-            C_max = max(C_c, C_h)
-            C_r = C_min / C_max if C_max > 0 else 0
-            
-            NTU = U * A / C_min if C_min > 0 else 0
-            
-            if flow_arrangement == "counter" or flow_arrangement == "parallel":
-                effectiveness = 1 - math.exp(-NTU)
-            else:
-                effectiveness = 1 - math.exp(-NTU)
-                
+        # Determine which fluid is changing phase
+        if hex_type == "evaporator":
+            # Refrigerant evaporating: C_ref → ∞
+            C_min = C_c  # Secondary fluid capacity
+            C_r = 0  # Phase change
+        elif hex_type == "condenser":
+            # Refrigerant condensing: C_ref → ∞
+            C_min = C_c  # Secondary fluid capacity
+            C_r = 0  # Phase change
         else:
             # Single-phase both sides
-            C_min = min(C_c, C_h)
-            C_max = max(C_c, C_h)
+            C_min = min(C_h, C_c)
+            C_max = max(C_h, C_c)
             C_r = C_min / C_max if C_max > 0 else 0
-            
-            NTU = U * A / C_min if C_min > 0 else 0
-            
+        
+        # Calculate NTU
+        NTU = U * A / C_min if C_min > 0 else 0
+        
+        # Calculate effectiveness
+        if C_r == 0:
+            # Phase change (evaporator/condenser)
+            effectiveness = 1 - math.exp(-NTU)
+        else:
             if flow_arrangement == "counter":
-                if C_r < 1:
-                    effectiveness = (1 - math.exp(-NTU * (1 - C_r))) / (1 - C_r * math.exp(-NTU * (1 - C_r)))
-                else:
-                    effectiveness = NTU / (1 + NTU)
+                effectiveness = (1 - math.exp(-NTU * (1 - C_r))) / (1 - C_r * math.exp(-NTU * (1 - C_r)))
             else:  # parallel
                 effectiveness = (1 - math.exp(-NTU * (1 + C_r))) / (1 + C_r)
         
         return NTU, effectiveness
     
     def calculate_two_phase_htc(self, refrigerant: str, quality: float, G: float, 
-                              D: float, type: str = "evaporator") -> float:
+                              D: float, hex_type: str = "evaporator") -> float:
         """
-        Calculate two-phase heat transfer coefficient using Shah correlation
-        
-        Args:
-            refrigerant: Refrigerant name
-            quality: Vapor quality (0-1)
-            G: Mass flux (kg/m²s)
-            D: Tube diameter (m)
-            type: 'evaporator' or 'condenser'
-            
-        Returns:
-            Two-phase heat transfer coefficient (W/m²K)
+        Calculate two-phase heat transfer coefficient
+        Simplified Shah correlation for boiling/condensation
         """
         props = self.REFRIGERANTS[refrigerant]
         
-        # Calculate single-phase liquid HTC (Dittus-Boelter)
+        # Calculate single-phase liquid HTC as baseline
         Re_l = G * D / props["mu_liquid"]
         Pr_l = props["pr_liquid"]
         
         if Re_l > 2300:
             Nu_l = 0.023 * Re_l**0.8 * Pr_l**0.4
         else:
-            Nu_l = 4.36  # Fully developed laminar
+            Nu_l = 4.36
         
         h_l = Nu_l * props["k_liquid"] / D
         
-        # Shah correlation for two-phase
-        if type == "evaporator":
-            # Evaporation correlation
+        # Simplified two-phase multiplier
+        if hex_type == "evaporator":
+            # Boiling
             if quality <= 0:
                 return h_l
             elif quality >= 1:
-                # Calculate vapor HTC
+                # All vapor
                 Re_v = G * D / props["mu_vapor"]
                 Pr_v = props["pr_vapor"]
                 if Re_v > 2300:
                     Nu_v = 0.023 * Re_v**0.8 * Pr_v**0.4
                 else:
                     Nu_v = 4.36
-                h_v = Nu_v * props["k_vapor"] / D
-                return h_v
+                return Nu_v * props["k_vapor"] / D
             else:
-                # Two-phase region
-                Co = ((1 - quality) / quality)**0.8 * (props["rho_vapor"] / props["rho_liquid"])**0.5
-                if Co > 1.0:
-                    # Nucleate boiling dominant
-                    h_tp = h_l * 230 * Co**0.5
-                else:
-                    # Convective boiling dominant
-                    h_tp = h_l * (1.8 / Co**0.8)
-                
-                return max(h_l, h_tp)
-                
-        else:  # condenser
-            # Condensation correlation
-            if quality >= 1:
-                return h_l
-            elif quality <= 0:
-                Re_v = G * D / props["mu_vapor"]
-                Pr_v = props["pr_vapor"]
-                if Re_v > 2300:
-                    Nu_v = 0.023 * Re_v**0.8 * Pr_v**0.4
-                else:
-                    Nu_v = 4.36
-                h_v = Nu_v * props["k_vapor"] / D
-                return h_v
-            else:
-                # Two-phase condensation (Akers et al. correlation)
-                Re_eq = G * D / props["mu_liquid"] * ((1 - quality) + quality * 
-                        math.sqrt(props["rho_liquid"] / props["rho_vapor"]))
-                
-                if Re_eq > 5e4:
-                    Nu = 0.0265 * Re_eq**0.8 * Pr_l**(1/3)
-                else:
-                    Nu = 5.03 * Re_eq**(1/3) * Pr_l**(1/3)
-                
-                h_tp = Nu * props["k_liquid"] / D
-                return h_tp
-    
-    def calculate_pressure_drop_two_phase(self, refrigerant: str, quality_in: float, 
-                                        quality_out: float, G: float, L: float, 
-                                        D: float, type: str = "evaporator") -> float:
-        """
-        Calculate two-phase pressure drop using Lockhart-Martinelli method
-        
-        Returns:
-            Pressure drop (Pa)
-        """
-        props = self.REFRIGERANTS[refrigerant]
-        
-        # Average quality
-        x_avg = (quality_in + quality_out) / 2
-        
-        # Martinelli parameter
-        X_tt = ((1 - x_avg) / x_avg)**0.9 * (props["rho_vapor"] / props["rho_liquid"])**0.5 * \
-               (props["mu_liquid"] / props["mu_vapor"])**0.1
-        
-        # Two-phase multiplier
-        phi_l2 = 1 + 20/X_tt + 1/X_tt**2
-        
-        # Liquid-only pressure drop
-        f_l = 0.046 * (G * D / props["mu_liquid"])**-0.2 if (G * D / props["mu_liquid"]) > 2300 else 64/(G * D / props["mu_liquid"])
-        dp_l = 2 * f_l * (L/D) * G**2 * (1 - x_avg)**2 / props["rho_liquid"]
-        
-        # Two-phase pressure drop
-        dp_tp = dp_l * phi_l2
-        
-        return dp_tp
-    
-    def calculate_overall_u(self, h_i: float, h_o: float, tube_k: float, 
-                          tube_id: float, tube_od: float, fouling_i: float = 0.0002,
-                          fouling_o: float = 0.0002) -> float:
-        """
-        Calculate overall heat transfer coefficient with fouling
-        
-        Args:
-            h_i: Inside HTC (W/m²K)
-            h_o: Outside HTC (W/m²K)
-            tube_k: Tube thermal conductivity (W/mK)
-            tube_id: Tube inner diameter (m)
-            tube_od: Tube outer diameter (m)
-            fouling_i: Inside fouling factor (m²K/W)
-            fouling_o: Outside fouling factor (m²K/W)
-            
-        Returns:
-            Overall U based on outside area (W/m²K)
-        """
-        # Thermal resistances
-        R_i = 1 / (h_i * (tube_id / tube_od))  # Based on outside area
-        R_o = 1 / h_o
-        R_w = math.log(tube_od / tube_id) / (2 * math.pi * tube_k * 1)  # per unit length
-        R_fi = fouling_i * (tube_od / tube_id)
-        R_fo = fouling_o
-        
-        R_total = R_i + R_o + R_w + R_fi + R_fo
-        
-        return 1 / R_total if R_total > 0 else 0
-    
-    def design_evaporator(self, inputs: Dict) -> Dict:
-        """
-        Design evaporator using proper engineering methods
-        
-        Design Methodology:
-        1. Energy balance to determine heat duty
-        2. Two-phase HTC calculation using Shah correlation
-        3. ε-NTU method for heat exchanger sizing
-        4. Pressure drop calculation using Lockhart-Martinelli
-        5. Iterative solution for outlet conditions
-        """
-        # Extract inputs
-        m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
-        T_evap = inputs["T_ref"]
-        superheat = inputs["delta_T_sh_sc"]
-        
-        m_dot_sec = inputs["m_dot_sec"] / 1000 / 3600  # L/hr to m³/s
-        T_sec_in = inputs["T_sec_in"]
-        glycol_percent = inputs["glycol_percentage"]
-        
-        # Secondary fluid properties (simplified water/glycol)
-        sec_props = self.calculate_secondary_properties(T_sec_in, glycol_percent)
-        m_dot_sec_kg = m_dot_sec * sec_props["rho"]
-        
-        # Refrigerant properties
-        ref_props = self.REFRIGERANTS[inputs["refrigerant"]]
-        
-        # Step 1: Energy balance
-        # Refrigerant enthalpy change
-        # Assuming refrigerant enters as saturated liquid (x=0) and exits superheated
-        h_in = ref_props["cp_liquid"] * T_evap  # Simplified
-        h_out = ref_props["cp_liquid"] * T_evap + ref_props["h_fg"] + ref_props["cp_vapor"] * superheat
-        
-        Q_total = m_dot_ref * (h_out - h_in)  # kW
-        
-        # Step 2: Initial guess for secondary outlet temperature
-        C_sec = m_dot_sec_kg * sec_props["cp"] * 1000  # W/K (capacity rate)
-        T_sec_out_guess = T_sec_in + Q_total * 1000 / C_sec
-        
-        # Step 3: Tube-side calculations (refrigerant evaporation)
-        tube_od = inputs["tube_od"]
-        tube_id = tube_od - 2 * inputs["tube_thickness"]/1000
-        n_tubes = inputs["n_tubes"]
-        n_passes = inputs["n_passes"]
-        tube_length = inputs["tube_length"]
-        
-        # Flow area per pass
-        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / n_passes
-        
-        # Mass flux
-        G_ref = m_dot_ref / A_flow_tube if A_flow_tube > 0 else 0
-        
-        # Two-phase HTC (average over evaporation)
-        # Assume linear quality change from 0 to 1 in evaporator
-        h_tp_evap = self.calculate_two_phase_htc(
-            inputs["refrigerant"], 0.5, G_ref, tube_id, "evaporator"
-        )
-        
-        # Superheat region HTC (single-phase vapor)
-        # Mass flux for superheat region is same
-        Re_v = G_ref * tube_id / ref_props["mu_vapor"]
-        Pr_v = ref_props["pr_vapor"]
-        if Re_v > 2300:
-            Nu_v = 0.023 * Re_v**0.8 * Pr_v**0.4
+                # Two-phase boiling (simplified)
+                return h_l * (1 + 10 * quality**0.8)
         else:
-            Nu_v = 4.36
-        h_sh = Nu_v * ref_props["k_vapor"] / tube_id
+            # Condensation
+            if quality >= 1:
+                # All vapor
+                Re_v = G * D / props["mu_vapor"]
+                Pr_v = props["pr_vapor"]
+                if Re_v > 2300:
+                    Nu_v = 0.023 * Re_v**0.8 * Pr_v**0.4
+                else:
+                    Nu_v = 4.36
+                return Nu_v * props["k_vapor"] / D
+            elif quality <= 0:
+                return h_l
+            else:
+                # Two-phase condensation (simplified)
+                return h_l * (1 + 8 * (1 - quality)**0.8)
+    
+    def calculate_shell_diameter(self, tube_od: float, n_tubes: int, pitch_ratio: float = 1.25,
+                               tube_layout: str = "triangular") -> float:
+        """Calculate shell diameter based on tube count and layout"""
+        # TEMA standards constants
+        if tube_layout.lower() == "triangular":
+            if pitch_ratio == 1.25:
+                K1 = 0.319
+                n1 = 2.142
+            else:
+                K1 = 0.249
+                n1 = 2.207
+        else:  # square
+            if pitch_ratio == 1.25:
+                K1 = 0.215
+                n1 = 2.207
+            else:
+                K1 = 0.156
+                n1 = 2.291
         
-        # Weighted average HTC for evaporator + superheat
-        # Assume 90% evaporation, 10% superheat by length
-        h_i = 0.9 * h_tp_evap + 0.1 * h_sh
+        # Bundle diameter
+        bundle_diameter = tube_od * (n_tubes / K1) ** (1 / n1)
         
-        # Step 4: Shell-side calculations (secondary fluid)
-        shell_dia = inputs["shell_diameter"] / 1000  # mm to m
-        pitch = inputs["tube_pitch"] / 1000  # mm to m
-        baffle_spacing = tube_length / (inputs["n_baffles"] + 1)
+        # Add clearance
+        shell_diameter = bundle_diameter + 0.025  # 25mm clearance
         
-        # Calculate shell-side flow area
-        A_flow_shell = self.calculate_shell_flow_area(
-            shell_dia, tube_od, pitch, inputs["tube_layout"], baffle_spacing
-        )
+        return max(shell_diameter, 0.1)  # Minimum 100mm
+    
+    def calculate_overall_u(self, h_i: float, h_o: float, tube_k: float,
+                          tube_id: float, tube_od: float) -> float:
+        """Calculate overall heat transfer coefficient"""
+        # Thermal resistances (based on outer area)
+        R_i = 1 / (h_i * (tube_id / tube_od))
+        R_o = 1 / h_o
+        R_w = math.log(tube_od / tube_id) / (2 * math.pi * tube_k)
+        R_f = 0.0002 * (1 + tube_od / tube_id)  # Fouling
         
-        # Shell-side velocity
-        v_sec = m_dot_sec_kg / (sec_props["rho"] * A_flow_shell) if A_flow_shell > 0 else 0
+        U = 1 / (R_i + R_o + R_w + R_f)
+        return U
+    
+    def design_heat_exchanger(self, inputs: Dict) -> Dict:
+        """Main design calculation using ε-NTU method"""
         
-        # Shell-side HTC (Bell-Delaware method simplified)
-        D_e = 4 * (pitch**2 - math.pi * tube_od**2 / 4) / (math.pi * tube_od)  # Equivalent diameter
+        # Extract inputs
+        hex_type = inputs["hex_type"].lower()
+        refrigerant = inputs["refrigerant"]
+        m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
+        T_ref = inputs["T_ref"]
+        delta_T = inputs["delta_T_sh_sc"]
         
+        # Secondary fluid
+        glycol_percent = inputs["glycol_percentage"]
+        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/s
+        T_sec_in = inputs["T_sec_in"]
+        
+        # Geometry
+        tube_size = inputs["tube_size"]
+        tube_material = inputs["tube_material"]
+        tube_thickness = inputs["tube_thickness"] / 1000  # m
+        n_passes = inputs["n_passes"]
+        n_baffles = inputs["n_baffles"]
+        n_tubes = inputs["n_tubes"]
+        tube_length = inputs["tube_length"]
+        tube_layout = inputs["tube_layout"]
+        
+        # Get properties
+        ref_props = self.REFRIGERANTS[refrigerant]
+        sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent)
+        
+        # Convert secondary flow to kg/s
+        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
+        
+        # Calculate heat duty
+        if hex_type == "evaporator":
+            # Latent heat + superheat
+            Q_total = m_dot_ref * (ref_props["h_fg"] + ref_props["cp_vapor"] * delta_T)
+            T_ref_out = T_ref + delta_T
+        else:  # condenser
+            # Latent heat + subcool
+            Q_total = m_dot_ref * (ref_props["h_fg"] + ref_props["cp_liquid"] * delta_T)
+            T_ref_out = T_ref - delta_T
+        
+        # Tube dimensions
+        tube_od = self.TUBE_SIZES[tube_size]
+        tube_id = tube_od - 2 * tube_thickness
+        if tube_id <= 0:
+            tube_id = tube_od * 0.8  # Fallback
+        
+        # Calculate shell diameter
+        shell_diameter = self.calculate_shell_diameter(tube_od, n_tubes, 1.25, tube_layout)
+        
+        # Flow areas
+        tube_flow_area = (math.pi * tube_id**2 / 4) * n_tubes / n_passes
+        shell_flow_area = (shell_diameter * tube_length / (n_baffles + 1)) * 0.3  # Simplified
+        
+        # Mass fluxes
+        G_ref = m_dot_ref / tube_flow_area if tube_flow_area > 0 else 0
+        v_sec = m_dot_sec_kg / (sec_props["rho"] * shell_flow_area) if shell_flow_area > 0 else 0
+        
+        # Heat transfer coefficients
+        if hex_type == "evaporator":
+            # Two-phase evaporation
+            h_ref = self.calculate_two_phase_htc(refrigerant, 0.5, G_ref, tube_id, "evaporator")
+        else:
+            # Two-phase condensation
+            h_ref = self.calculate_two_phase_htc(refrigerant, 0.5, G_ref, tube_id, "condenser")
+        
+        # Shell-side HTC
+        D_e = 4 * shell_flow_area / (math.pi * tube_od * n_tubes) if n_tubes > 0 else tube_od
         Re_shell = sec_props["rho"] * v_sec * D_e / sec_props["mu"]
         
         if Re_shell > 100:
@@ -371,568 +391,680 @@ class HeatExchangerDesign:
         else:
             Nu_shell = 3.66
         
-        h_o = Nu_shell * sec_props["k"] / D_e
+        h_shell = Nu_shell * sec_props["k"] / D_e
         
-        # Step 5: Overall heat transfer coefficient
-        tube_k = inputs["tube_k"]
-        U = self.calculate_overall_u(h_i, h_o, tube_k, tube_id, tube_od)
+        # Overall U
+        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
+        U = self.calculate_overall_u(h_ref, h_shell, tube_k, tube_id, tube_od)
         
-        # Step 6: ε-NTU method
-        C_min = C_sec  # Refrigerant has C → ∞ during phase change
+        # Capacity rates
+        C_sec = m_dot_sec_kg * sec_props["cp"]  # W/K
+        C_ref_inf = 1e10  # Approximate infinite for phase change
+        
+        # Total area
         A_total = math.pi * tube_od * tube_length * n_tubes
         
-        NTU, effectiveness = self.calculate_ntu_effectiveness(
-            C_sec, 1e6, U, A_total, inputs["flow_arrangement"], "evaporator"
-        )
+        # Calculate NTU and effectiveness using ε-NTU method
+        if hex_type == "evaporator":
+            NTU, effectiveness = self.calculate_ntu_effectiveness(
+                C_ref_inf, C_sec, U, A_total, inputs["flow_arrangement"], hex_type
+            )
+        else:
+            NTU, effectiveness = self.calculate_ntu_effectiveness(
+                C_sec, C_ref_inf, U, A_total, inputs["flow_arrangement"], hex_type
+            )
         
-        # Step 7: Calculate actual heat transfer
-        Q_max = C_min * (T_sec_in - T_evap) if T_sec_in > T_evap else 0
-        Q_actual = effectiveness * Q_max if Q_max > 0 else 0
+        # Calculate outlet temperatures
+        if hex_type == "evaporator":
+            T_sec_out = T_sec_in - effectiveness * (T_sec_in - T_ref)
+            Q_actual = effectiveness * C_sec * (T_sec_in - T_ref)
+        else:
+            T_sec_out = T_sec_in + effectiveness * (T_ref - T_sec_in)
+            Q_actual = effectiveness * C_sec * (T_ref - T_sec_in)
         
-        # Step 8: Calculate outlet temperatures
-        T_sec_out = T_sec_in - Q_actual / C_sec if C_sec > 0 else T_sec_in
-        # For evaporator, refrigerant temperature is approximately constant during evaporation
+        # Pressure drops (simplified)
+        if hex_type == "evaporator":
+            rho_ref = (ref_props["rho_liquid"] + ref_props["rho_vapor"]) / 2
+        else:
+            rho_ref = ref_props["rho_liquid"]
         
-        # Step 9: Pressure drops
-        # Two-phase pressure drop in tubes
-        dp_tube_tp = self.calculate_pressure_drop_two_phase(
-            inputs["refrigerant"], 0, 1, G_ref, tube_length * n_passes, tube_id, "evaporator"
-        )
+        v_ref = G_ref / rho_ref
+        Re_ref = rho_ref * v_ref * tube_id / (ref_props["mu_liquid"] if hex_type == "condenser" else ref_props["mu_vapor"])
         
-        # Single-phase pressure drop for superheat section (10% of length)
-        f_v = 0.046 * Re_v**-0.2 if Re_v > 2300 else 64/Re_v
-        dp_tube_sh = 2 * f_v * (tube_length * n_passes * 0.1 / tube_id) * (G_ref**2 / ref_props["rho_vapor"])
+        if Re_ref > 2300:
+            f_ref = 0.046 * Re_ref**-0.2
+        else:
+            f_ref = 64 / Re_ref if Re_ref > 0 else 0.05
         
-        dp_tube_total = dp_tube_tp + dp_tube_sh
+        dp_tube = f_ref * (tube_length * n_passes / tube_id) * (rho_ref * v_ref**2 / 2)
         
-        # Shell-side pressure drop (simplified)
-        f_shell = 0.2 * Re_shell**-0.2 if Re_shell > 0 else 0.2
-        dp_shell = 2 * f_shell * (tube_length / D_e) * inputs["n_baffles"] * \
-                   (sec_props["rho"] * v_sec**2 / 2)
+        if Re_shell > 0:
+            f_shell = 0.2 * Re_shell**-0.2
+        else:
+            f_shell = 0.2
+        
+        dp_shell = f_shell * (tube_length / D_e) * n_baffles * (sec_props["rho"] * v_sec**2 / 2)
+        
+        # Calculate required area based on heat duty
+        if hex_type == "evaporator":
+            dt1 = T_sec_in - T_ref
+            dt2 = T_sec_out - T_ref_out
+        else:
+            dt1 = T_ref - T_sec_in
+            dt2 = T_ref_out - T_sec_out
+        
+        if inputs["flow_arrangement"] == "counter":
+            dt1, dt2 = dt1, dt2
+        else:
+            dt1 = T_sec_in - T_ref if hex_type == "evaporator" else T_ref - T_sec_in
+            dt2 = T_sec_out - T_ref_out if hex_type == "evaporator" else T_ref_out - T_sec_out
+        
+        if dt1 <= 0 or dt2 <= 0 or abs(dt1 - dt2) < 1e-6:
+            LMTD = min(dt1, dt2) if min(dt1, dt2) > 0 else 0
+        else:
+            LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
+        
+        A_required = (Q_total * 1000) / (U * LMTD) if U > 0 and LMTD > 0 else 0
         
         # Store results
         self.results = {
-            "design_method": "ε-NTU Method with Two-Phase Correlations",
             "heat_duty_kw": Q_total,
-            "q_actual_kw": Q_actual / 1000,
             "effectiveness": effectiveness,
             "ntu": NTU,
             "overall_u": U,
-            "h_tube_two_phase": h_tp_evap,
-            "h_tube_superheat": h_sh,
-            "h_tube_avg": h_i,
-            "h_shell": h_o,
+            "h_tube": h_ref,
+            "h_shell": h_shell,
             "t_sec_out": T_sec_out,
-            "dp_tube_kpa": dp_tube_total / 1000,
+            "t_ref_out": T_ref_out,
+            "dp_tube_kpa": dp_tube / 1000,
             "dp_shell_kpa": dp_shell / 1000,
-            "mass_flux_kg_m2s": G_ref,
-            "reynolds_tube": Re_v,
-            "reynolds_shell": Re_shell,
+            "shell_diameter_m": shell_diameter,
+            "velocity_tube_ms": v_ref,
             "velocity_shell_ms": v_sec,
-            "velocity_tube_ms": G_ref / ref_props["rho_liquid"],  # Approximate as liquid
+            "reynolds_tube": Re_ref,
+            "reynolds_shell": Re_shell,
             "area_total_m2": A_total,
-            "area_required_m2": (Q_total * 1000) / (U * self.calculate_lmtd(
-                T_sec_in, T_sec_out, T_evap, T_evap + superheat, inputs["flow_arrangement"]
-            )) if U > 0 else 0
+            "area_required_m2": A_required,
+            "area_ratio": A_total / A_required if A_required > 0 else 0,
+            "mass_flux": G_ref,
+            "design_status": "Adequate" if effectiveness >= 0.7 and A_total >= A_required else "Inadequate",
+            "design_method": "ε-NTU Method"
         }
         
         return self.results
-    
-    def design_condenser(self, inputs: Dict) -> Dict:
-        """Design condenser using proper engineering methods"""
-        # Similar structure to evaporator but with condensation correlations
-        # Implementation follows same pattern as evaporator
-        pass
-    
-    def calculate_lmtd(self, th_in: float, th_out: float, 
-                      tc_in: float, tc_out: float, flow_type: str) -> float:
-        """Calculate Log Mean Temperature Difference"""
-        if flow_type == "counter":
-            dt1 = th_in - tc_out
-            dt2 = th_out - tc_in
-        else:
-            dt1 = th_in - tc_in
-            dt2 = th_out - tc_out
-        
-        if dt1 <= 0 or dt2 <= 0:
-            return 0
-        elif abs(dt1 - dt2) < 1e-6:
-            return dt1
-        else:
-            return (dt1 - dt2) / math.log(dt1 / dt2)
-    
-    def calculate_secondary_properties(self, T: float, glycol_percent: int) -> Dict:
-        """Calculate water/glycol properties"""
-        # Simplified property calculation
-        base = {
-            "rho": 1000 - 0.2 * glycol_percent + 0.01 * T,  # kg/m³
-            "cp": 4.18 - 0.02 * glycol_percent,  # kJ/kgK
-            "k": 0.6 - 0.003 * glycol_percent,  # W/mK
-            "mu": (1 + 0.05 * glycol_percent) * 1e-3 * math.exp(-0.02 * (T-20)),  # Pa·s
-            "pr": 7.0 * (1 + 0.1 * glycol_percent)  # Prandtl number
-        }
-        base["cp"] *= 1000  # Convert to J/kgK for calculations
-        return base
-    
-    def calculate_shell_flow_area(self, D_s: float, D_o: float, pitch: float, 
-                                layout: str, baffle_spacing: float) -> float:
-        """Calculate shell-side flow area"""
-        if layout == "triangular":
-            # Triangular pitch
-            area = baffle_spacing * (pitch - D_o) * D_s / pitch
-        else:
-            # Square pitch
-            area = baffle_spacing * (pitch - D_o)
-        
-        return max(area, 0.001)  # Minimum area
 
-# Streamlit Interface
-st.title("🌡️ Engineering-Grade Heat Exchanger Designer")
-st.markdown("### Using ε-NTU Method with Two-Phase Correlations")
-
-# Initialize session state
-if 'results' not in st.session_state:
-    st.session_state.results = None
-
-# Sidebar for inputs
-with st.sidebar:
-    st.header("⚙️ Design Parameters")
+def create_input_section():
+    """Create input section in sidebar"""
+    st.sidebar.header("⚙️ Design Inputs")
+    
+    # Initialize session state for thickness
+    if 'tube_thickness' not in st.session_state:
+        st.session_state.tube_thickness = 1.0
+    
+    inputs = {}
     
     # Heat exchanger type
-    hex_type = st.radio("Type", ["Evaporator", "Condenser"])
+    inputs["hex_type"] = st.sidebar.radio(
+        "Heat Exchanger Type",
+        ["Evaporator", "Condenser"]
+    )
     
-    # Refrigerant side
-    st.subheader("Refrigerant Side")
-    refrigerant = st.selectbox("Refrigerant", list(HeatExchangerDesign.REFRIGERANTS.keys()))
-    m_dot_ref = st.number_input("Mass Flow (kg/hr)", 100, 10000, 500)
-    
-    if hex_type == "Evaporator":
-        T_ref = st.number_input("Evaporating Temp (°C)", -50.0, 20.0, 5.0)
-        superheat = st.number_input("Superheat (K)", 0.0, 20.0, 5.0)
-    else:
-        T_ref = st.number_input("Condensing Temp (°C)", 20.0, 80.0, 45.0)
-        subcool = st.number_input("Subcooling (K)", 0.0, 20.0, 5.0)
-    
-    # Secondary fluid side
-    st.subheader("Secondary Fluid Side")
-    glycol_percent = st.slider("Glycol %", 0, 50, 0)
-    m_dot_sec = st.number_input("Flow Rate (L/hr)", 100, 100000, 5000)
-    T_sec_in = st.number_input("Inlet Temp (°C)", 0.0, 80.0, 25.0)
-    flow_arrangement = st.radio("Flow", ["Counter", "Parallel"])
-    
-    # Geometry
-    st.subheader("Geometry")
-    tube_od = st.number_input("Tube OD (mm)", 6.35, 38.1, 12.7) / 1000
-    tube_thickness = st.number_input("Tube Thickness (mm)", 0.5, 3.0, 1.0)
-    tube_k = st.number_input("Tube k (W/mK)", 10, 400, 50)
-    n_tubes = st.slider("Number of Tubes", 1, 500, 100)
-    n_passes = st.selectbox("Passes", [1, 2, 4, 6])
-    tube_length = st.number_input("Tube Length (m)", 0.5, 10.0, 3.0)
-    
-    shell_diameter = st.number_input("Shell Diameter (mm)", 50, 1000, 200)
-    tube_pitch = st.number_input("Tube Pitch (mm)", 
-                                float(tube_od*1000*1.1), 
-                                50.0, 
-                                float(tube_od*1000*1.25))
-    tube_layout = st.radio("Layout", ["Triangular", "Square"])
-    n_baffles = st.slider("Baffles", 1, 20, 5)
-    
-    # Calculate button
-    if st.button("🚀 Perform Engineering Design", type="primary"):
-        designer = HeatExchangerDesign()
-        
-        inputs = {
-            "refrigerant": refrigerant,
-            "m_dot_ref": m_dot_ref,
-            "T_ref": T_ref,
-            "delta_T_sh_sc": superheat if hex_type == "Evaporator" else subcool,
-            "glycol_percentage": glycol_percent,
-            "m_dot_sec": m_dot_sec,
-            "T_sec_in": T_sec_in,
-            "flow_arrangement": flow_arrangement.lower(),
-            "tube_od": tube_od,
-            "tube_thickness": tube_thickness,
-            "tube_k": tube_k,
-            "n_tubes": n_tubes,
-            "n_passes": n_passes,
-            "tube_length": tube_length,
-            "shell_diameter": shell_diameter,
-            "tube_pitch": tube_pitch,
-            "tube_layout": tube_layout.lower(),
-            "n_baffles": n_baffles
-        }
-        
-        with st.spinner("Performing engineering calculations..."):
-            if hex_type == "Evaporator":
-                results = designer.design_evaporator(inputs)
-            else:
-                results = designer.design_condenser(inputs)
-            
-            st.session_state.results = results
-            st.session_state.inputs = inputs
-
-# Main display area
-if st.session_state.results:
-    results = st.session_state.results
-    
-    st.markdown("## 📊 Engineering Design Results")
-    
-    # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Fluid arrangement
+    col1, col2 = st.sidebar.columns(2)
     with col1:
-        st.metric("Heat Duty", f"{results['heat_duty_kw']:.2f} kW")
+        inputs["tube_side"] = st.selectbox(
+            "Tube Side Fluid",
+            ["Refrigerant", "Water/Glycol"]
+        )
     with col2:
-        st.metric("Effectiveness", f"{results['effectiveness']:.3f}")
+        inputs["shell_side"] = st.selectbox(
+            "Shell Side Fluid",
+            ["Water/Glycol", "Refrigerant"]
+        )
+    
+    st.sidebar.markdown("---")
+    
+    # Refrigerant parameters
+    st.sidebar.subheader("Refrigerant Parameters")
+    
+    # Initialize designer for refrigerant list
+    designer_temp = HeatExchangerDesign()
+    inputs["refrigerant"] = st.sidebar.selectbox(
+        "Refrigerant",
+        list(designer_temp.REFRIGERANTS.keys())
+    )
+    
+    inputs["m_dot_ref"] = st.sidebar.number_input(
+        "Refrigerant Mass Flow (kg/hr)",
+        min_value=10.0,
+        max_value=10000.0,
+        value=500.0,
+        step=50.0
+    )
+    
+    if inputs["hex_type"] == "Evaporator":
+        inputs["T_ref"] = st.sidebar.number_input(
+            "Evaporating Temperature (°C)",
+            min_value=-50.0,
+            max_value=20.0,
+            value=5.0,
+            step=1.0
+        )
+        inputs["delta_T_sh_sc"] = st.sidebar.number_input(
+            "Superheating (ΔT in K)",
+            min_value=0.0,
+            max_value=20.0,
+            value=5.0,
+            step=0.5
+        )
+    else:
+        inputs["T_ref"] = st.sidebar.number_input(
+            "Condensing Temperature (°C)",
+            min_value=20.0,
+            max_value=80.0,
+            value=45.0,
+            step=1.0
+        )
+        inputs["delta_T_sh_sc"] = st.sidebar.number_input(
+            "Subcooling (ΔT in K)",
+            min_value=0.0,
+            max_value=20.0,
+            value=5.0,
+            step=0.5
+        )
+    
+    st.sidebar.markdown("---")
+    
+    # Secondary fluid parameters
+    st.sidebar.subheader("Water/Glycol Parameters")
+    
+    secondary_type = st.sidebar.radio(
+        "Secondary Fluid Type",
+        ["Water", "Water + PE Glycol"]
+    )
+    
+    if secondary_type == "Water + PE Glycol":
+        inputs["glycol_percentage"] = st.sidebar.select_slider(
+            "Glycol Percentage",
+            options=[0, 10, 20, 30, 40, 50],
+            value=20
+        )
+    else:
+        inputs["glycol_percentage"] = 0
+    
+    inputs["secondary_fluid"] = secondary_type
+    
+    inputs["m_dot_sec"] = st.sidebar.number_input(
+        "Flow Rate (L/hr)",
+        min_value=100.0,
+        max_value=100000.0,
+        value=5000.0,
+        step=500.0
+    )
+    
+    inputs["T_sec_in"] = st.sidebar.number_input(
+        "Inlet Temperature (°C)",
+        min_value=0.0,
+        max_value=80.0,
+        value=25.0 if inputs["hex_type"] == "Condenser" else 12.0,
+        step=1.0
+    )
+    
+    inputs["flow_arrangement"] = st.sidebar.radio(
+        "Flow Arrangement",
+        ["Counter", "Parallel"]
+    ).lower()
+    
+    st.sidebar.markdown("---")
+    
+    # Geometry parameters
+    st.sidebar.subheader("Geometry Parameters")
+    
+    # Initialize for tube sizes
+    inputs["tube_size"] = st.sidebar.selectbox(
+        "Tube Size",
+        list(designer_temp.TUBE_SIZES.keys())
+    )
+    
+    inputs["tube_material"] = st.sidebar.selectbox(
+        "Tube Material",
+        list(designer_temp.TUBE_MATERIALS.keys())
+    )
+    
+    # Tube thickness with +/- buttons
+    col1, col2, col3 = st.sidebar.columns(3)
+    with col1:
+        if st.button("−", key="thickness_minus"):
+            st.session_state.tube_thickness = max(0.1, st.session_state.tube_thickness - 0.1)
+    with col2:
+        inputs["tube_thickness"] = st.number_input(
+            "Tube Thickness (mm)",
+            min_value=0.1,
+            max_value=5.0,
+            value=st.session_state.tube_thickness,
+            step=0.1,
+            key="thickness_input"
+        )
     with col3:
-        st.metric("NTU", f"{results['ntu']:.2f}")
+        if st.button("＋", key="thickness_plus"):
+            st.session_state.tube_thickness = min(5.0, st.session_state.tube_thickness + 0.1)
+    
+    inputs["n_passes"] = st.sidebar.selectbox(
+        "Tube Passes",
+        [1, 2, 4, 6]
+    )
+    
+    inputs["n_baffles"] = st.sidebar.slider(
+        "Number of Baffles",
+        min_value=1,
+        max_value=20,
+        value=5,
+        step=1
+    )
+    
+    inputs["n_tubes"] = st.sidebar.slider(
+        "Number of Tubes",
+        min_value=1,
+        max_value=500,
+        value=100,
+        step=1
+    )
+    
+    inputs["tube_length"] = st.sidebar.slider(
+        "Tube Length (m)",
+        min_value=0.5,
+        max_value=10.0,
+        value=3.0,
+        step=0.5
+    )
+    
+    inputs["tube_layout"] = st.sidebar.radio(
+        "Tube Layout",
+        ["Triangular", "Square"]
+    ).lower()
+    
+    return inputs
+
+def display_results(results: Dict, inputs: Dict):
+    """Display calculation results"""
+    
+    st.markdown("## 📊 Design Results")
+    st.info(f"**Design Method:** {results.get('design_method', 'ε-NTU Method')}")
+    
+    # Key metrics in columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Heat Duty",
+            f"{results['heat_duty_kw']:.2f} kW",
+            delta_color="normal"
+        )
+    
+    with col2:
+        status_color = "normal" if results['design_status'] == "Adequate" else "inverse"
+        st.metric(
+            "Design Status",
+            results['design_status'],
+            delta_color=status_color
+        )
+    
+    with col3:
+        st.metric(
+            "Effectiveness (ε)",
+            f"{results['effectiveness']:.3f}",
+            help="ε = Q_actual / Q_max"
+        )
+    
     with col4:
-        st.metric("Overall U", f"{results['overall_u']:.1f} W/m²K")
+        st.metric(
+            "NTU",
+            f"{results['ntu']:.2f}",
+            help="NTU = UA / C_min"
+        )
     
     st.markdown("---")
     
-    # Design Methodology
-    st.markdown("### 🔬 Design Methodology")
-    
-    with st.expander("📐 Engineering Methods Used", expanded=True):
-        st.markdown("""
-        #### **1. ε-NTU Method (Effectiveness - Number of Transfer Units)**
-        
-        For phase-change heat exchangers (evaporators/condensers):
-        ```
-        C_min = m_dot_secondary * cp_secondary
-        C_max → ∞ (for refrigerant during phase change)
-        C_r = C_min / C_max ≈ 0
-        
-        NTU = U × A / C_min
-        ε = 1 - exp(-NTU)  (for C_r = 0)
-        Q_actual = ε × Q_max
-        ```
-        
-        **Advantages over LMTD:**
-        - Direct calculation of outlet temperatures
-        - Better for phase-change applications
-        - Works for any flow arrangement
-        
-        #### **2. Two-Phase Heat Transfer Correlations**
-        
-        **Evaporator (Shah Correlation):**
-        ```
-        h_tp = h_l × [(1 - x)^0.8 + 3.8×x^0.76×(1-x)^0.04/Pr_l^0.38]
-        ```
-        Where:
-        - h_l: Liquid-only heat transfer coefficient
-        - x: Vapor quality (0-1)
-        - Pr_l: Liquid Prandtl number
-        
-        **Condenser (Akers Correlation):**
-        ```
-        Re_eq = G×D/μ_l × [(1-x) + x×√(ρ_l/ρ_v)]
-        Nu = 0.0265×Re_eq^0.8×Pr_l^(1/3)  (for Re > 50,000)
-        ```
-        
-        #### **3. Pressure Drop Calculation**
-        
-        **Two-Phase (Lockhart-Martinelli):**
-        ```
-        X_tt = [(1-x)/x]^0.9 × (ρ_v/ρ_l)^0.5 × (μ_l/μ_v)^0.1
-        φ_l² = 1 + 20/X_tt + 1/X_tt²
-        ΔP_tp = ΔP_l × φ_l²
-        ```
-        
-        #### **4. Overall Heat Transfer Coefficient**
-        
-        ```
-        1/U = 1/h_i × (A_o/A_i) + 1/h_o + R_w + R_fi + R_fo
-        ```
-        Where:
-        - h_i: Inside (tube-side) HTC
-        - h_o: Outside (shell-side) HTC
-        - R_w: Tube wall resistance
-        - R_fi, R_fo: Fouling resistances
-        """)
-    
-    # Heat Transfer Details
-    st.markdown("### 🔥 Heat Transfer Analysis")
+    # Temperature results
+    st.markdown("### 🌡️ Temperature Profile")
     
     col1, col2 = st.columns(2)
+    
     with col1:
-        st.markdown("#### Tube Side (Refrigerant)")
-        st.write(f"**Two-Phase HTC:** {results['h_tube_two_phase']:.1f} W/m²K")
-        st.write(f"**Superheat HTC:** {results['h_tube_superheat']:.1f} W/m²K")
-        st.write(f"**Average HTC:** {results['h_tube_avg']:.1f} W/m²K")
-        st.write(f"**Mass Flux:** {results['mass_flux_kg_m2s']:.1f} kg/m²s")
-        st.write(f"**Reynolds (vapor):** {results['reynolds_tube']:.0f}")
-        
+        st.markdown("#### Refrigerant")
+        if inputs["hex_type"] == "Evaporator":
+            st.write(f"**Inlet (Saturated Liquid):** {inputs['T_ref']:.1f} °C")
+            st.write(f"**Outlet (Superheated Vapor):** {results['t_ref_out']:.1f} °C")
+            st.write(f"**Superheating:** {inputs['delta_T_sh_sc']:.1f} K")
+        else:
+            st.write(f"**Inlet (Saturated Vapor):** {inputs['T_ref']:.1f} °C")
+            st.write(f"**Outlet (Subcooled Liquid):** {results['t_ref_out']:.1f} °C")
+            st.write(f"**Subcooling:** {inputs['delta_T_sh_sc']:.1f} K")
+    
     with col2:
-        st.markdown("#### Shell Side (Secondary)")
+        st.markdown("#### Secondary Fluid")
+        st.write(f"**Inlet:** {inputs['T_sec_in']:.1f} °C")
+        st.write(f"**Outlet:** {results['t_sec_out']:.1f} °C")
+        st.write(f"**Temperature Change:** {abs(results['t_sec_out'] - inputs['T_sec_in']):.1f} K")
+    
+    # Heat transfer details
+    st.markdown("### 🔥 Heat Transfer Analysis")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### Tube Side")
+        st.write(f"**HTC:** {results['h_tube']:.1f} W/m²K")
+        st.write(f"**Velocity:** {results['velocity_tube_ms']:.2f} m/s")
+        st.write(f"**Reynolds:** {results['reynolds_tube']:.0f}")
+        st.write(f"**Mass Flux:** {results['mass_flux']:.1f} kg/m²s")
+    
+    with col2:
+        st.markdown("#### Shell Side")
         st.write(f"**HTC:** {results['h_shell']:.1f} W/m²K")
         st.write(f"**Velocity:** {results['velocity_shell_ms']:.2f} m/s")
         st.write(f"**Reynolds:** {results['reynolds_shell']:.0f}")
-        st.write(f"**Outlet Temp:** {results['t_sec_out']:.1f} °C")
+        st.write(f"**Shell Diameter:** {results['shell_diameter_m']*1000:.1f} mm")
     
-    # Pressure Drop
-    st.markdown("### ⚡ Pressure Drops")
+    with col3:
+        st.markdown("#### Overall")
+        st.write(f"**Overall U:** {results['overall_u']:.1f} W/m²K")
+        st.write(f"**Tube ΔP:** {results['dp_tube_kpa']:.2f} kPa")
+        st.write(f"**Shell ΔP:** {results['dp_shell_kpa']:.2f} kPa")
+        st.write(f"**Area Total:** {results['area_total_m2']:.2f} m²")
+        st.write(f"**Area Required:** {results['area_required_m2']:.2f} m²")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Tube Side ΔP", f"{results['dp_tube_kpa']:.2f} kPa")
-    with col2:
-        st.metric("Shell Side ΔP", f"{results['dp_shell_kpa']:.2f} kPa")
+    st.markdown("---")
     
-    # Area Analysis
-    st.markdown("### 📐 Area Analysis")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Total Area Available", f"{results['area_total_m2']:.2f} m²")
-    with col2:
-        if results['area_required_m2'] > 0:
-            st.metric("Area Required", f"{results['area_required_m2']:.2f} m²")
-            area_ratio = results['area_total_m2'] / results['area_required_m2']
-            st.metric("Area Ratio", f"{area_ratio:.2f}")
-    
-    # Visualization
-    st.markdown("### 📈 Performance Visualization")
+    # ε-NTU Analysis
+    st.markdown("### 📈 ε-NTU Analysis")
     
     # Create NTU-effectiveness chart
     fig = go.Figure()
     
-    # Generate NTU range
+    # Generate curves for different C_r values
     ntu_range = np.linspace(0, 5, 100)
     
-    # For C_r = 0 (phase change)
+    # C_r = 0 (phase change) - all flow arrangements
     epsilon_cr0 = 1 - np.exp(-ntu_range)
     
-    # For C_r = 0.5
-    epsilon_cr05 = (1 - np.exp(-ntu_range * 0.5)) / (1 - 0.5 * np.exp(-ntu_range * 0.5))
+    # C_r = 0.5
+    epsilon_cr05_counter = (1 - np.exp(-ntu_range * 0.5)) / (1 - 0.5 * np.exp(-ntu_range * 0.5))
     
-    # For C_r = 1.0
-    epsilon_cr1 = ntu_range / (1 + ntu_range)
+    # C_r = 1.0
+    epsilon_cr1_counter = ntu_range / (1 + ntu_range)
+    epsilon_cr1_parallel = (1 - np.exp(-2 * ntu_range)) / 2
     
-    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr0, mode='lines', 
+    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr0, mode='lines',
                             name='C_r = 0 (Phase Change)', line=dict(color='blue', width=3)))
-    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr05, mode='lines', 
-                            name='C_r = 0.5', line=dict(color='green', dash='dash')))
-    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr1, mode='lines', 
-                            name='C_r = 1.0', line=dict(color='red', dash='dot')))
+    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr05_counter, mode='lines',
+                            name='C_r = 0.5, Counter', line=dict(color='green', dash='dash')))
+    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr1_counter, mode='lines',
+                            name='C_r = 1.0, Counter', line=dict(color='red', dash='dot')))
+    fig.add_trace(go.Scatter(x=ntu_range, y=epsilon_cr1_parallel, mode='lines',
+                            name='C_r = 1.0, Parallel', line=dict(color='orange', dash='dot')))
     
-    # Mark design point
+    # Add design point
     if results['ntu'] <= 5:
-        fig.add_trace(go.Scatter(x=[results['ntu']], y=[results['effectiveness']], 
-                                mode='markers', name='Design Point',
-                                marker=dict(size=15, color='gold', symbol='star')))
+        fig.add_trace(go.Scatter(
+            x=[results['ntu']],
+            y=[results['effectiveness']],
+            mode='markers+text',
+            name='Design Point',
+            marker=dict(size=15, color='gold', symbol='star'),
+            text=[f"NTU={results['ntu']:.2f}, ε={results['effectiveness']:.3f}"],
+            textposition="top right"
+        ))
     
     fig.update_layout(
         title='NTU-Effectiveness Diagram',
         xaxis_title='NTU',
         yaxis_title='Effectiveness (ε)',
         hovermode='x unified',
-        template='plotly_white'
+        template='plotly_white',
+        height=500
     )
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Engineering Recommendations
-    st.markdown("### 💡 Engineering Recommendations")
+    # Design recommendations
+    st.markdown("### 💡 Design Recommendations")
     
     if results['effectiveness'] < 0.7:
-        st.error("""
-        **Low Effectiveness Design!**
-        - Effectiveness should typically be > 0.7 for efficient designs
-        - Consider: Increasing heat transfer area, improving flow arrangement, or optimizing velocities
+        st.error(f"""
+        **Low Effectiveness Design!** (ε = {results['effectiveness']:.3f})
+        
+        Effectiveness below 0.7 indicates poor heat exchanger performance.
+        
+        **Recommended Actions:**
+        1. **Increase heat transfer area:**
+           - Add more tubes (currently {inputs['n_tubes']})
+           - Increase tube length (currently {inputs['tube_length']} m)
+           - Use smaller tube pitch to fit more tubes
+        2. **Improve heat transfer coefficients:**
+           - Increase fluid velocities
+           - Consider different tube material
+           - Optimize baffle spacing
+        3. **Review operating conditions:**
+           - Check temperature approach
+           - Verify flow rates
+           - Consider different refrigerant
         """)
     elif results['effectiveness'] > 0.95:
-        st.warning("""
-        **Very High Effectiveness**
-        - While efficient, this may indicate overdesign
-        - High effectiveness often requires large area → higher cost
-        - Consider cost-effectiveness tradeoff
+        st.warning(f"""
+        **Very High Effectiveness** (ε = {results['effectiveness']:.3f})
+        
+        While high effectiveness is good, values above 0.95 often indicate overdesign.
+        
+        **Consider:**
+        - Reducing heat transfer area for cost savings
+        - Using smaller tubes or fewer passes
+        - Checking if such high effectiveness is truly required
         """)
     else:
-        st.success("""
-        **Good Design Effectiveness**
-        - Effectiveness in optimal range (0.7-0.95)
-        - Balanced between performance and cost
+        st.success(f"""
+        **Good Design Effectiveness** (ε = {results['effectiveness']:.3f})
+        
+        Effectiveness in optimal range (0.7-0.95).
+        
+        **Design is balanced between performance and cost.**
         """)
     
+    # Area analysis
+    area_ratio = results['area_total_m2'] / results['area_required_m2'] if results['area_required_m2'] > 0 else 0
+    if area_ratio < 0.9:
+        st.warning(f"""
+        **Undersized Heat Transfer Area!**
+        - Available: {results['area_total_m2']:.2f} m²
+        - Required: {results['area_required_m2']:.2f} m²
+        - Ratio: {area_ratio:.2f} (should be ≥ 1.0)
+        """)
+    elif area_ratio > 1.1:
+        st.info(f"""
+        **Oversized Heat Transfer Area**
+        - Available: {results['area_total_m2']:.2f} m²
+        - Required: {results['area_required_m2']:.2f} m²
+        - Ratio: {area_ratio:.2f}
+        - Consider reducing area for cost savings
+        """)
+    
+    # Pressure drop checks
     if results['dp_tube_kpa'] > 100:
-        st.warning(f"**High tube-side pressure drop ({results['dp_tube_kpa']:.1f} kPa):** Consider larger tubes or fewer passes.")
+        st.warning(f"**High tube-side pressure drop:** {results['dp_tube_kpa']:.1f} kPa. Consider larger tubes or fewer passes.")
     
     if results['dp_shell_kpa'] > 50:
-        st.warning(f"**High shell-side pressure drop ({results['dp_shell_kpa']:.1f} kPa):** Consider increasing shell diameter or reducing baffles.")
+        st.warning(f"**High shell-side pressure drop:** {results['dp_shell_kpa']:.1f} kPa. Consider larger shell diameter or reduce baffles.")
     
-    # Export Results
     st.markdown("---")
-    if st.button("📥 Export Engineering Report"):
-        report = f"""
-        HEAT EXCHANGER ENGINEERING DESIGN REPORT
-        =========================================
+    
+    # Export results
+    st.markdown("### 💾 Export Results")
+    
+    if st.button("📥 Download Engineering Report", key="download_report"):
+        report_data = {
+            "Parameter": [
+                "Heat Exchanger Type",
+                "Refrigerant",
+                "Design Method",
+                "Heat Duty (kW)",
+                "Effectiveness (ε)",
+                "NTU",
+                "Overall U (W/m²K)",
+                "Tube Side HTC (W/m²K)",
+                "Shell Side HTC (W/m²K)",
+                "Secondary Outlet Temp (°C)",
+                "Refrigerant Outlet Temp (°C)",
+                "Shell Diameter (mm)",
+                "Tube Side ΔP (kPa)",
+                "Shell Side ΔP (kPa)",
+                "Total Area (m²)",
+                "Required Area (m²)",
+                "Area Ratio",
+                "Design Status"
+            ],
+            "Value": [
+                inputs["hex_type"],
+                inputs["refrigerant"],
+                results.get('design_method', 'ε-NTU Method'),
+                f"{results['heat_duty_kw']:.2f}",
+                f"{results['effectiveness']:.3f}",
+                f"{results['ntu']:.2f}",
+                f"{results['overall_u']:.1f}",
+                f"{results['h_tube']:.1f}",
+                f"{results['h_shell']:.1f}",
+                f"{results['t_sec_out']:.1f}",
+                f"{results['t_ref_out']:.1f}",
+                f"{results['shell_diameter_m']*1000:.1f}",
+                f"{results['dp_tube_kpa']:.2f}",
+                f"{results['dp_shell_kpa']:.2f}",
+                f"{results['area_total_m2']:.2f}",
+                f"{results['area_required_m2']:.2f}",
+                f"{area_ratio:.2f}",
+                results['design_status']
+            ]
+        }
         
-        Design Method: {results.get('design_method', 'ε-NTU with Two-Phase Correlations')}
-        
-        PERFORMANCE SUMMARY:
-        -------------------
-        Heat Duty: {results['heat_duty_kw']:.2f} kW
-        Effectiveness (ε): {results['effectiveness']:.3f}
-        NTU: {results['ntu']:.2f}
-        Overall U: {results['overall_u']:.1f} W/m²K
-        
-        HEAT TRANSFER COEFFICIENTS:
-        ---------------------------
-        Tube Side (Two-Phase): {results['h_tube_two_phase']:.1f} W/m²K
-        Tube Side (Superheat): {results['h_tube_superheat']:.1f} W/m²K
-        Tube Side (Average): {results['h_tube_avg']:.1f} W/m²K
-        Shell Side: {results['h_shell']:.1f} W/m²K
-        
-        PRESSURE DROPS:
-        --------------
-        Tube Side: {results['dp_tube_kpa']:.2f} kPa
-        Shell Side: {results['dp_shell_kpa']:.2f} kPa
-        
-        FLOW PARAMETERS:
-        ----------------
-        Mass Flux: {results['mass_flux_kg_m2s']:.1f} kg/m²s
-        Tube Velocity: {results['velocity_tube_ms']:.2f} m/s
-        Shell Velocity: {results['velocity_shell_ms']:.2f} m/s
-        Tube Reynolds: {results['reynolds_tube']:.0f}
-        Shell Reynolds: {results['reynolds_shell']:.0f}
-        
-        AREA ANALYSIS:
-        --------------
-        Total Area: {results['area_total_m2']:.2f} m²
-        Required Area: {results['area_required_m2']:.2f} m²
-        Area Ratio: {results['area_total_m2']/results['area_required_m2']:.2f if results['area_required_m2'] > 0 else 'N/A'}
-        
-        DESIGN ASSESSMENT:
-        -----------------
-        {"✅ Design Adequate" if results['effectiveness'] > 0.7 else "⚠️ Design Needs Improvement"}
-        
-        Notes:
-        - Calculations based on ε-NTU method for phase-change applications
-        - Two-phase HTC using Shah correlation
-        - Pressure drop using Lockhart-Martinelli method
-        - For detailed design, perform iterative refinement
-        """
+        df_report = pd.DataFrame(report_data)
+        csv = df_report.to_csv(index=False)
         
         st.download_button(
-            label="Download Engineering Report",
-            data=report,
-            file_name="heat_exchanger_engineering_report.txt",
-            mime="text/plain"
+            label="Download CSV Report",
+            data=csv,
+            file_name="heat_exchanger_engineering_report.csv",
+            mime="text/csv",
+            key="download_csv"
         )
 
-else:
-    # Initial instructions
-    st.markdown("""
-    ## 🎯 Engineering Design Methodology
+# Main application
+st.markdown("<h1 class='main-header'>🌡️ Shell & Tube Heat Exchanger Designer</h1>", unsafe_allow_html=True)
+st.markdown("### Using ε-NTU Method for Evaporators and Condensers")
+
+# Initialize session state for results
+if 'results' not in st.session_state:
+    st.session_state.results = None
+if 'inputs' not in st.session_state:
+    st.session_state.inputs = None
+
+# Create layout
+col1, col2 = st.columns([3, 1])
+
+with col2:
+    # Input section in sidebar
+    inputs = create_input_section()
     
-    This tool performs **proper engineering design** of shell and tube heat exchangers using:
-    
-    ### **Core Engineering Methods:**
-    
-    1. **ε-NTU (Effectiveness - Number of Transfer Units) Method**
-       - More accurate than LMTD for phase-change applications
-       - Direct calculation of outlet temperatures
-       - Works for any flow arrangement
-    
-    2. **Two-Phase Heat Transfer Correlations**
-       - **Evaporators**: Shah correlation for boiling
-       - **Condensers**: Akers correlation for condensation
-       - Accounts for vapor quality changes
-    
-    3. **Two-Phase Pressure Drop**
-       - Lockhart-Martinelli method
-       - Accounts for phase interaction effects
-    
-    4. **Proper Thermal Resistance Network**
-       - Includes fouling factors
-       - Accounts for tube wall resistance
-       - Based on actual areas
-    
-    ### **Key Advantages Over Simplified Methods:**
-    
-    - **Accuracy**: Proper two-phase correlations
-    - **Flexibility**: Works for any flow arrangement
-    - **Physics-Based**: Accounts for actual phase-change behavior
-    - **Iterative Design**: Can be extended for optimization
-    
-    ### **Typical Design Process:**
-    
-    1. **Energy Balance**: Calculate required heat duty
-    2. **HTC Calculation**: Two-phase and single-phase regions
-    3. **Overall U**: Include all thermal resistances
-    4. **ε-NTU Analysis**: Determine effectiveness and NTU
-    5. **Outlet Temperatures**: Calculate from effectiveness
-    6. **Pressure Drop**: Two-phase and single-phase regions
-    7. **Design Assessment**: Check constraints and optimize
-    
-    ### **To Get Started:**
-    
-    1. Configure all parameters in the sidebar
-    2. Click "Perform Engineering Design"
-    3. Review detailed engineering analysis
-    4. Export report for documentation
-    
-    ⚠️ **Note**: This is for preliminary design. Final design should include:
-    - Detailed property lookups (REFPROP)
-    - Full Bell-Delaware method for shell side
-    - Mechanical design calculations
-    - Code compliance checks (ASME, TEMA)
-    """)
-    
-    # Quick reference for correlations
-    with st.expander("📚 Engineering Correlation References"):
+    # Calculate button
+    if st.sidebar.button("🚀 Calculate Design", type="primary", use_container_width=True):
+        with st.spinner("Performing engineering calculations..."):
+            designer = HeatExchangerDesign()
+            
+            # Convert inputs for calculation
+            calc_inputs = inputs.copy()
+            calc_inputs["hex_type"] = calc_inputs["hex_type"].lower()
+            
+            # Perform calculation
+            results = designer.design_heat_exchanger(calc_inputs)
+            
+            # Store results in session state
+            st.session_state.results = results
+            st.session_state.inputs = inputs
+            
+            st.rerun()
+
+with col1:
+    # Display results if available
+    if st.session_state.results is not None:
+        display_results(st.session_state.results, st.session_state.inputs)
+    else:
+        # Show instructions and methodology
         st.markdown("""
-        ### **Two-Phase Heat Transfer Correlations**
+        ## 🎯 Engineering Design Methodology
         
-        #### **1. Shah Correlation (Evaporation & Condensation)**
-        ```
-        h_tp = h_l × [(1 - x)^0.8 + 3.8×x^0.76×(1-x)^0.04/Pr_l^0.38]
-        ```
-        *Reference: Shah, M.M., 1979. A general correlation for heat transfer during film condensation inside pipes. Int. J. Heat Mass Transfer, 22(4), pp.547-556.*
+        This tool uses the **ε-NTU (Effectiveness - Number of Transfer Units) method** 
+        for accurate heat exchanger design, especially for phase-change applications.
         
-        #### **2. Akers Correlation (Condensation)**
+        ### **Key Engineering Methods:**
+        
+        #### **1. ε-NTU Method**
         ```
-        Re_eq = G×D/μ_l × [(1-x) + x×√(ρ_l/ρ_v)]
-        Nu = 0.0265×Re_eq^0.8×Pr_l^(1/3)  (for Re > 50,000)
-        Nu = 5.03×Re_eq^(1/3)×Pr_l^(1/3)  (for Re < 50,000)
+        NTU = UA / C_min
+        ε = Q_actual / Q_max
         ```
         
-        #### **3. Lockhart-Martinelli (Pressure Drop)**
+        **For evaporators/condensers (C_r = 0):**
         ```
-        X_tt = [(1-x)/x]^0.9 × (ρ_v/ρ_l)^0.5 × (μ_l/μ_v)^0.1
-        φ_l² = 1 + 20/X_tt + 1/X_tt²
-        ```
-        
-        ### **Single-Phase Correlations**
-        
-        #### **1. Dittus-Boelter (Turbulent Flow)**
-        ```
-        Nu = 0.023 × Re^0.8 × Pr^n
-        n = 0.4 for heating, 0.3 for cooling
+        ε = 1 - exp(-NTU)
         ```
         
-        #### **2. Bell-Delaware (Shell Side)**
+        #### **2. Two-Phase Heat Transfer**
+        - **Evaporators**: Simplified Shah correlation for boiling
+        - **Condensers**: Simplified correlation for condensation
+        - Accounts for vapor quality changes
+        
+        #### **3. Thermal Resistance Network**
         ```
-        Nu_shell = j × Re × Pr^(1/3)
-        j = f(Re, baffle cut, tube layout)
+        1/U = 1/h_i × (A_o/A_i) + 1/h_o + R_wall + R_fouling
         ```
-        *Simplified version used in this tool*
         
-        ### **ε-NTU Relations**
+        ### **Design Process:**
         
-        | Flow Arrangement | Effectiveness Relation (C_r = 0) |
-        |------------------|----------------------------------|
-        | All arrangements | ε = 1 - exp(-NTU)                |
+        1. **Energy Balance**: Calculate heat duty from refrigerant properties
+        2. **Heat Transfer Coefficients**: Calculate h for both sides
+        3. **Overall U**: Include all thermal resistances
+        4. **ε-NTU Analysis**: Determine effectiveness and NTU
+        5. **Outlet Temperatures**: Calculate from effectiveness
+        6. **Pressure Drop**: Estimate using fluid mechanics
+        7. **Design Assessment**: Check constraints
         
-        *For phase change, C_r → 0, so all arrangements give same relation*
+        ### **To Get Started:**
+        
+        1. Configure all parameters in the sidebar
+        2. Click "Calculate Design"
+        3. Review detailed engineering analysis
+        4. Use recommendations to optimize design
+        
+        ### **Design Guidelines:**
+        
+        - **Effectiveness (ε)**: 0.7-0.95 is optimal
+        - **NTU**: Typically 1-3 for good designs
+        - **Pressure Drop**: < 100 kPa tube side, < 50 kPa shell side
+        - **Area Ratio**: Available/Required ≥ 1.0
+        
+        ⚠️ **Note**: This is for preliminary design. Final design requires:
+        - Detailed property data (REFPROP)
+        - Full Bell-Delaware method for shell side
+        - Mechanical design calculations
+        - Code compliance verification
         """)
+        
+        # Quick example button
+        if st.button("📋 Show Example Calculation", key="example_button"):
+            st.info("Configure parameters in sidebar and click 'Calculate Design' to see example results.")
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666;'>
-    <p>🔬 <strong>Engineering-Grade Design Tool</strong> | ε-NTU Method with Two-Phase Correlations</p>
-    <p>⚠️ For preliminary design only | Consult ASME/TEMA standards for final design</p>
+    <p>🔬 <strong>Engineering Design Tool</strong> | ε-NTU Method with Two-Phase Correlations</p>
+    <p>⚠️ For preliminary design only | Consult engineering standards for final design</p>
 </div>
 """, unsafe_allow_html=True)
