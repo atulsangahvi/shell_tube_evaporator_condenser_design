@@ -132,6 +132,21 @@ st.markdown("""
     .stButton>button {
         width: 100%;
     }
+    .input-with-buttons {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-bottom: 10px;
+    }
+    .input-label {
+        font-weight: bold;
+        margin-bottom: 5px;
+        color: #374151;
+    }
+    .number-input {
+        width: 100px;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -532,12 +547,88 @@ class DXHeatExchangerDesign:
         
         return Nu * k / D_e
     
-    def design_dx_evaporator(self, inputs: Dict) -> Dict:
+    def design_from_kw(self, inputs: Dict) -> Dict:
+        """Design heat exchanger from kW requirement"""
+        
+        # Extract inputs
+        hex_type = inputs["hex_type"].lower()
+        refrigerant = inputs["refrigerant"]
+        Q_total_kw = inputs["heat_duty_kw"]  # kW from user input
+        
+        if hex_type == "evaporator":
+            T_ref = inputs["T_ref"]
+            delta_T_superheat = inputs["delta_T_sh_sc"]
+            
+            # Get properties
+            ref_props = self.REFRIGERANTS[refrigerant]
+            
+            # Calculate mass flow from kW: Q = m_dot * (h_fg + cp_vapor * ΔT_superheat)
+            total_enthalpy_change = ref_props["h_fg"] + ref_props["cp_vapor"] * delta_T_superheat
+            m_dot_ref = Q_total_kw / total_enthalpy_change  # kg/s
+            
+            T_ref_out = T_ref + delta_T_superheat
+            
+            # Calculate sensible and latent portions
+            Q_latent = m_dot_ref * ref_props["h_fg"]
+            Q_sensible = m_dot_ref * ref_props["cp_vapor"] * delta_T_superheat
+            
+        else:  # condenser
+            T_ref = inputs["T_ref"]
+            delta_T_subcool = inputs["delta_T_sh_sc"]
+            
+            # Get properties
+            ref_props = self.REFRIGERANTS[refrigerant]
+            
+            # Calculate mass flow from kW: Q = m_dot * (h_fg + cp_liquid * ΔT_subcool)
+            total_enthalpy_change = ref_props["h_fg"] + ref_props["cp_liquid"] * delta_T_subcool
+            m_dot_ref = Q_total_kw / total_enthalpy_change  # kg/s
+            
+            T_ref_out = T_ref - delta_T_subcool
+            
+            # Calculate sensible and latent portions
+            Q_latent = m_dot_ref * ref_props["h_fg"]
+            Q_sensible = m_dot_ref * ref_props["cp_liquid"] * delta_T_subcool
+        
+        # Return calculated parameters
+        return {
+            "m_dot_ref": m_dot_ref,
+            "T_ref_out": T_ref_out,
+            "Q_latent": Q_latent,
+            "Q_sensible": Q_sensible,
+            "Q_total": Q_total_kw,
+            "ref_props": ref_props
+        }
+    
+    def design_dx_evaporator(self, inputs: Dict, design_from_kw: bool = False) -> Dict:
         """Design DX evaporator - refrigerant in tubes, water/glycol in shell"""
         
         # Extract inputs
         refrigerant = inputs["refrigerant"]
-        m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
+        
+        if design_from_kw:
+            # Calculate from kW requirement
+            kw_results = self.design_from_kw(inputs)
+            m_dot_ref = kw_results["m_dot_ref"]  # kg/s
+            T_ref_out = kw_results["T_ref_out"]
+            Q_latent = kw_results["Q_latent"]
+            Q_sensible = kw_results["Q_sensible"]
+            Q_total = kw_results["Q_total"]
+            ref_props = kw_results["ref_props"]
+        else:
+            # Use direct mass flow input
+            m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
+            T_evap = inputs["T_ref"]
+            delta_T_superheat = inputs["delta_T_sh_sc"]
+            ref_props = self.REFRIGERANTS[refrigerant]
+            
+            # Calculate heat duty (evaporator)
+            # Q = m_dot_ref * (h_fg + cp_vapor * ΔT_superheat)
+            Q_latent = m_dot_ref * ref_props["h_fg"]  # kW
+            Q_sensible = m_dot_ref * ref_props["cp_vapor"] * delta_T_superheat  # kW
+            Q_total = Q_latent + Q_sensible  # kW
+            T_ref_out = T_evap + delta_T_superheat
+            T_evap = inputs["T_ref"]
+        
         T_evap = inputs["T_ref"]
         delta_T_superheat = inputs["delta_T_sh_sc"]
         
@@ -558,20 +649,11 @@ class DXHeatExchangerDesign:
         tube_length = inputs["tube_length"]
         tube_layout = inputs["tube_layout"].lower()
         
-        # Get properties
-        ref_props = self.REFRIGERANTS[refrigerant]
+        # Get water/glycol properties
         sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
         
         # Convert secondary flow to kg/s
         m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
-        
-        # Calculate heat duty (evaporator)
-        # Q = m_dot_ref * (h_fg + cp_vapor * ΔT_superheat)
-        Q_latent = m_dot_ref * ref_props["h_fg"]  # kW
-        Q_sensible = m_dot_ref * ref_props["cp_vapor"] * delta_T_superheat  # kW
-        Q_total = Q_latent + Q_sensible  # kW
-        
-        T_ref_out = T_evap + delta_T_superheat
         
         # Tube dimensions
         tube_od = self.TUBE_SIZES[tube_size]
@@ -703,6 +785,7 @@ class DXHeatExchangerDesign:
             "heat_exchanger_type": "DX Evaporator",
             "refrigerant_side": "Tube side",
             "water_side": "Shell side",
+            "design_method": "kW Input" if design_from_kw else "Mass Flow Input",
             
             # Thermal performance
             "heat_duty_kw": Q_total,
@@ -761,17 +844,40 @@ class DXHeatExchangerDesign:
             
             # Design status
             "design_status": self.determine_design_status(effectiveness, A_total, A_required),
-            "design_method": "DX Evaporator Design"
         }
         
         return self.results
     
-    def design_condenser(self, inputs: Dict) -> Dict:
+    def design_condenser(self, inputs: Dict, design_from_kw: bool = False) -> Dict:
         """Design condenser - refrigerant in tubes, water/glycol in shell"""
         
         # Extract inputs
         refrigerant = inputs["refrigerant"]
-        m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
+        
+        if design_from_kw:
+            # Calculate from kW requirement
+            kw_results = self.design_from_kw(inputs)
+            m_dot_ref = kw_results["m_dot_ref"]  # kg/s
+            T_ref_out = kw_results["T_ref_out"]
+            Q_latent = kw_results["Q_latent"]
+            Q_sensible = kw_results["Q_sensible"]
+            Q_total = kw_results["Q_total"]
+            ref_props = kw_results["ref_props"]
+        else:
+            # Use direct mass flow input
+            m_dot_ref = inputs["m_dot_ref"] / 3600  # kg/s
+            T_cond = inputs["T_ref"]
+            delta_T_subcool = inputs["delta_T_sh_sc"]
+            ref_props = self.REFRIGERANTS[refrigerant]
+            
+            # Calculate heat duty (condenser)
+            # Q = m_dot_ref * (h_fg + cp_liquid * ΔT_subcool)
+            Q_latent = m_dot_ref * ref_props["h_fg"]  # kW
+            Q_sensible = m_dot_ref * ref_props["cp_liquid"] * delta_T_subcool  # kW
+            Q_total = Q_latent + Q_sensible  # kW
+            T_ref_out = T_cond - delta_T_subcool
+            T_cond = inputs["T_ref"]
+        
         T_cond = inputs["T_ref"]
         delta_T_subcool = inputs["delta_T_sh_sc"]
         
@@ -792,20 +898,11 @@ class DXHeatExchangerDesign:
         tube_length = inputs["tube_length"]
         tube_layout = inputs["tube_layout"].lower()
         
-        # Get properties
-        ref_props = self.REFRIGERANTS[refrigerant]
+        # Get water/glycol properties
         sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
         
         # Convert secondary flow to kg/s
         m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
-        
-        # Calculate heat duty (condenser)
-        # Q = m_dot_ref * (h_fg + cp_liquid * ΔT_subcool)
-        Q_latent = m_dot_ref * ref_props["h_fg"]  # kW
-        Q_sensible = m_dot_ref * ref_props["cp_liquid"] * delta_T_subcool  # kW
-        Q_total = Q_latent + Q_sensible  # kW
-        
-        T_ref_out = T_cond - delta_T_subcool
         
         # Tube dimensions
         tube_od = self.TUBE_SIZES[tube_size]
@@ -929,6 +1026,7 @@ class DXHeatExchangerDesign:
             "heat_exchanger_type": "Condenser",
             "refrigerant_side": "Tube side",
             "water_side": "Shell side",
+            "design_method": "kW Input" if design_from_kw else "Mass Flow Input",
             
             # Thermal performance
             "heat_duty_kw": Q_total,
@@ -983,7 +1081,6 @@ class DXHeatExchangerDesign:
             
             # Design status
             "design_status": self.determine_design_status(effectiveness, A_total, A_required),
-            "design_method": "Condenser Design"
         }
         
         return self.results
@@ -1036,14 +1133,48 @@ class DXHeatExchangerDesign:
         else:
             return "Inadequate"
 
+# Helper function for number input with +/- buttons
+def number_input_with_buttons(label: str, min_value: float, max_value: float, 
+                            value: float, step: float, key: str, format: str = "%.1f",
+                            help_text: str = None) -> float:
+    """Create a number input with +/- buttons"""
+    
+    # Initialize session state for this input
+    if key not in st.session_state:
+        st.session_state[key] = value
+    
+    # Create columns for buttons and input
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col1:
+        if st.button("−", key=f"{key}_minus"):
+            st.session_state[key] = max(min_value, st.session_state[key] - step)
+    
+    with col2:
+        # Display current value
+        st.markdown(f"<div class='input-label'>{label}</div>", unsafe_allow_html=True)
+        if help_text:
+            st.caption(help_text)
+        value_input = st.number_input(
+            label="",
+            min_value=min_value,
+            max_value=max_value,
+            value=st.session_state[key],
+            step=step,
+            key=f"{key}_input",
+            label_visibility="collapsed",
+            format=format
+        )
+    
+    with col3:
+        if st.button("＋", key=f"{key}_plus"):
+            st.session_state[key] = min(max_value, st.session_state[key] + step)
+    
+    return value_input
+
 def create_input_section():
     """Create input section for DX evaporator and condenser design"""
     st.sidebar.header("⚙️ DX Heat Exchanger Design")
-    
-    # Initialize session state
-    for key in ['tube_thickness', 'tube_pitch', 'm_dot_sec']:
-        if key not in st.session_state:
-            st.session_state[key] = 1.0 if key == 'tube_thickness' else 25.0 if key == 'tube_pitch' else 5000.0
     
     inputs = {}
     
@@ -1062,39 +1193,91 @@ def create_input_section():
     
     st.sidebar.markdown("---")
     
-    # Refrigerant parameters
-    st.sidebar.subheader("🔧 Refrigerant (From Compressor)")
+    # Design method selection
+    st.sidebar.subheader("📊 Design Input Method")
+    design_method = st.sidebar.radio(
+        "Select Input Method",
+        ["Heat Duty (kW)", "Refrigerant Mass Flow"],
+        help="Design from total heat load or from compressor mass flow"
+    )
     
+    # Initialize designer for refrigerant list
     designer = DXHeatExchangerDesign()
+    
+    # Refrigerant parameters
+    st.sidebar.subheader("🔧 Refrigerant Parameters")
+    
     inputs["refrigerant"] = st.sidebar.selectbox(
         "Refrigerant Type",
         list(designer.REFRIGERANTS.keys())
     )
     
-    inputs["m_dot_ref"] = st.sidebar.number_input(
-        "Refrigerant Mass Flow (kg/hr)",
-        min_value=10.0, max_value=10000.0, value=500.0, step=10.0,
-        help="Fixed from compressor specification sheet"
-    )
-    
-    if inputs["hex_type"] == "DX Evaporator":
-        inputs["T_ref"] = st.sidebar.number_input(
-            "Evaporating Temperature (°C)",
-            min_value=-50.0, max_value=20.0, value=5.0, step=1.0
-        )
-        inputs["delta_T_sh_sc"] = st.sidebar.number_input(
-            "Superheat at Exit (K)",
-            min_value=3.0, max_value=15.0, value=5.0, step=0.5,
-            help="DX evaporators require 3-8K superheat for proper TXV operation"
+    if design_method == "Heat Duty (kW)":
+        # kW input method
+        inputs["heat_duty_kw"] = number_input_with_buttons(
+            label="Heat Duty (kW)",
+            min_value=1.0,
+            max_value=5000.0,
+            value=100.0,
+            step=10.0,
+            key="heat_duty",
+            format="%.0f",
+            help_text="Total heat load to be transferred"
         )
     else:
-        inputs["T_ref"] = st.sidebar.number_input(
-            "Condensing Temperature (°C)",
-            min_value=20.0, max_value=80.0, value=45.0, step=1.0
+        # Mass flow input method
+        inputs["m_dot_ref"] = number_input_with_buttons(
+            label="Refrigerant Mass Flow (kg/hr)",
+            min_value=10.0,
+            max_value=10000.0,
+            value=500.0,
+            step=10.0,
+            key="m_dot_ref",
+            format="%.0f",
+            help_text="From compressor specification sheet"
         )
-        inputs["delta_T_sh_sc"] = st.sidebar.number_input(
-            "Subcool at Exit (K)",
-            min_value=0.0, max_value=20.0, value=5.0, step=0.5
+    
+    # Temperature parameters
+    if inputs["hex_type"] == "DX Evaporator":
+        inputs["T_ref"] = number_input_with_buttons(
+            label="Evaporating Temperature (°C)",
+            min_value=-50.0,
+            max_value=20.0,
+            value=5.0,
+            step=1.0,
+            key="T_evap",
+            format="%.1f"
+        )
+        
+        inputs["delta_T_sh_sc"] = number_input_with_buttons(
+            label="Superheat at Exit (K)",
+            min_value=3.0,
+            max_value=15.0,
+            value=5.0,
+            step=0.5,
+            key="superheat",
+            format="%.1f",
+            help_text="DX evaporators require 3-8K superheat for proper TXV operation"
+        )
+    else:
+        inputs["T_ref"] = number_input_with_buttons(
+            label="Condensing Temperature (°C)",
+            min_value=20.0,
+            max_value=80.0,
+            value=45.0,
+            step=1.0,
+            key="T_cond",
+            format="%.1f"
+        )
+        
+        inputs["delta_T_sh_sc"] = number_input_with_buttons(
+            label="Subcool at Exit (K)",
+            min_value=0.0,
+            max_value=20.0,
+            value=5.0,
+            step=0.5,
+            key="subcool",
+            format="%.1f"
         )
     
     st.sidebar.markdown("---")
@@ -1135,11 +1318,16 @@ def create_input_section():
     
     # Glycol percentage
     if "Glycol" in glycol_choice:
-        inputs["glycol_percentage"] = st.sidebar.select_slider(
-            "Glycol Percentage",
-            options=[0, 10, 20, 30, 40, 50, 60],
+        # Use number input instead of slider
+        inputs["glycol_percentage"] = number_input_with_buttons(
+            label="Glycol Percentage",
+            min_value=0,
+            max_value=60,
             value=20,
-            help="Higher percentage = lower freeze point, higher viscosity"
+            step=5,
+            key="glycol_percent",
+            format="%.0f",
+            help_text="Higher percentage = lower freeze point, higher viscosity"
         )
         
         # Show freeze point
@@ -1149,34 +1337,26 @@ def create_input_section():
         inputs["glycol_percentage"] = 0
     
     # Water inlet temperature
-    inputs["T_sec_in"] = st.sidebar.number_input(
-        "Inlet Temperature (°C)",
+    inputs["T_sec_in"] = number_input_with_buttons(
+        label="Water Inlet Temperature (°C)",
         min_value=-20.0 if "Glycol" in glycol_choice else 0.0,
         max_value=80.0,
         value=25.0 if inputs["hex_type"] == "Condenser" else 12.0,
-        step=1.0
+        step=1.0,
+        key="T_water_in",
+        format="%.1f"
     )
     
     # Water flow rate
-    st.sidebar.markdown("**Water Flow Rate**")
-    
-    col1, col2, col3 = st.sidebar.columns(3)
-    with col1:
-        if st.button("−", key="flow_minus"):
-            st.session_state.m_dot_sec = max(100.0, st.session_state.m_dot_sec - 100.0)
-    with col2:
-        inputs["m_dot_sec"] = st.number_input(
-            "Flow Rate (L/hr)",
-            min_value=100.0,
-            max_value=100000.0,
-            value=st.session_state.m_dot_sec,
-            step=100.0,
-            key="flow_input",
-            label_visibility="collapsed"
-        )
-    with col3:
-        if st.button("＋", key="flow_plus"):
-            st.session_state.m_dot_sec = min(100000.0, st.session_state.m_dot_sec + 100.0)
+    inputs["m_dot_sec"] = number_input_with_buttons(
+        label="Water Flow Rate (L/hr)",
+        min_value=100.0,
+        max_value=100000.0,
+        value=5000.0,
+        step=100.0,
+        key="water_flow",
+        format="%.0f"
+    )
     
     # Flow arrangement
     inputs["flow_arrangement"] = st.sidebar.radio(
@@ -1201,44 +1381,26 @@ def create_input_section():
     )
     
     # Tube thickness
-    st.sidebar.markdown("**Tube Thickness**")
-    col1, col2, col3 = st.sidebar.columns(3)
-    with col1:
-        if st.button("−", key="thickness_minus"):
-            st.session_state.tube_thickness = max(0.1, st.session_state.tube_thickness - 0.1)
-    with col2:
-        inputs["tube_thickness"] = st.number_input(
-            "Thickness (mm)",
-            min_value=0.1,
-            max_value=5.0,
-            value=st.session_state.tube_thickness,
-            step=0.1,
-            key="thickness_input",
-            label_visibility="collapsed"
-        )
-    with col3:
-        if st.button("＋", key="thickness_plus"):
-            st.session_state.tube_thickness = min(5.0, st.session_state.tube_thickness + 0.1)
+    inputs["tube_thickness"] = number_input_with_buttons(
+        label="Tube Thickness (mm)",
+        min_value=0.1,
+        max_value=5.0,
+        value=1.0,
+        step=0.1,
+        key="tube_thickness",
+        format="%.1f"
+    )
     
     # Tube pitch
-    st.sidebar.markdown("**Tube Pitch**")
-    col1, col2, col3 = st.sidebar.columns(3)
-    with col1:
-        if st.button("−", key="pitch_minus"):
-            st.session_state.tube_pitch = max(15.0, st.session_state.tube_pitch - 0.5)
-    with col2:
-        inputs["tube_pitch"] = st.number_input(
-            "Pitch (mm)",
-            min_value=15.0,
-            max_value=100.0,
-            value=st.session_state.tube_pitch,
-            step=0.5,
-            key="pitch_input",
-            label_visibility="collapsed"
-        )
-    with col3:
-        if st.button("＋", key="pitch_plus"):
-            st.session_state.tube_pitch = min(100.0, st.session_state.tube_pitch + 0.5)
+    inputs["tube_pitch"] = number_input_with_buttons(
+        label="Tube Pitch (mm)",
+        min_value=15.0,
+        max_value=100.0,
+        value=25.0,
+        step=0.5,
+        key="tube_pitch",
+        format="%.1f"
+    )
     
     # Calculate and display pitch ratio
     tube_od = designer.TUBE_SIZES[inputs["tube_size"]] * 1000  # mm
@@ -1250,37 +1412,48 @@ def create_input_section():
     elif pitch_ratio > 1.5:
         st.sidebar.info("ℹ️ Pitch ratio > 1.5 is good for cleaning")
     
+    # Number of passes
     inputs["n_passes"] = st.sidebar.selectbox(
         "Tube Passes",
         [1, 2, 4, 6],
         help="Number of times refrigerant passes through tubes"
     )
     
-    inputs["n_baffles"] = st.sidebar.slider(
-        "Number of Baffles",
+    # Number of baffles
+    inputs["n_baffles"] = int(number_input_with_buttons(
+        label="Number of Baffles",
         min_value=1,
         max_value=20,
         value=5,
         step=1,
-        help="More baffles = better heat transfer but higher pressure drop"
-    )
+        key="n_baffles",
+        format="%.0f",
+        help_text="More baffles = better heat transfer but higher pressure drop"
+    ))
     
-    inputs["n_tubes"] = st.sidebar.slider(
-        "Number of Tubes",
+    # Number of tubes
+    inputs["n_tubes"] = int(number_input_with_buttons(
+        label="Number of Tubes",
         min_value=1,
         max_value=500,
         value=100,
-        step=1
-    )
+        step=1,
+        key="n_tubes",
+        format="%.0f"
+    ))
     
-    inputs["tube_length"] = st.sidebar.slider(
-        "Tube Length (m)",
+    # Tube length
+    inputs["tube_length"] = number_input_with_buttons(
+        label="Tube Length (m)",
         min_value=0.5,
         max_value=10.0,
         value=3.0,
-        step=0.5
+        step=0.1,
+        key="tube_length",
+        format="%.1f"
     )
     
+    # Tube layout
     inputs["tube_layout"] = st.sidebar.radio(
         "Tube Layout",
         ["Triangular", "Square"],
@@ -1309,7 +1482,7 @@ def create_input_section():
         - 50% EG: -36°C
         """)
     
-    return inputs
+    return inputs, design_method
 
 def display_velocity_indicator(velocity: float, status: Dict):
     """Display velocity with color-coded indicator"""
@@ -1331,7 +1504,7 @@ def display_glycol_badge(glycol_type: str, percentage: int):
     else:
         return '<span style="background-color: #EFF6FF; color: #1E40AF; padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.85rem;">Water Only</span>'
 
-def display_results(results: Dict, inputs: Dict):
+def display_results(results: Dict, inputs: Dict, design_method: str):
     """Display calculation results"""
     
     # Header with badges
@@ -1341,6 +1514,9 @@ def display_results(results: Dict, inputs: Dict):
             <h2>📊 DX Evaporator Design Results</h2>
             <span class="dx-badge">DX Type</span>
             {display_glycol_badge(results['glycol_type'], results['glycol_percentage'])}
+            <span style="margin-left: 10px; background-color: #FEF3C7; color: #92400E; padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.85rem;">
+                {results['design_method']}
+            </span>
         </div>
         """
     else:
@@ -1349,6 +1525,9 @@ def display_results(results: Dict, inputs: Dict):
             <h2>📊 Condenser Design Results</h2>
             <span class="condenser-badge">Condenser</span>
             {display_glycol_badge(results['glycol_type'], results['glycol_percentage'])}
+            <span style="margin-left: 10px; background-color: #FEF3C7; color: #92400E; padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.85rem;">
+                {results['design_method']}
+            </span>
         </div>
         """
     
@@ -1446,53 +1625,6 @@ def display_results(results: Dict, inputs: Dict):
     
     st.markdown("---")
     
-    # DX-specific warnings
-    if results["heat_exchanger_type"] == "DX Evaporator":
-        st.markdown("### ⚠️ DX-Specific Considerations")
-        
-        if results['distribution_status'] == "Poor":
-            st.error(f"""
-            **POOR REFRIGERANT DISTRIBUTION**
-            
-            Flow per tube ({results['flow_per_tube_kg_hr']:.1f} kg/hr) is too low for good distribution.
-            
-            **Solutions:**
-            1. Reduce number of tubes
-            2. Increase refrigerant flow (if compressor allows)
-            3. Use enhanced distributor design
-            4. Consider individual TXVs per circuit
-            """)
-        
-        if results['freeze_risk'] in ["High", "Medium"]:
-            st.warning(f"""
-            **FREEZE RISK DETECTED**
-            
-            Water outlet temperature ({results['t_sec_out']:.1f}°C) is close to freeze point ({results['freeze_point_c']:.1f}°C).
-            
-            **Recommendations:**
-            1. Increase glycol percentage
-            2. Increase water flow rate
-            3. Add freeze protection controls
-            4. Monitor temperature closely
-            """)
-        
-        if results['superheat'] < 3.0:
-            st.warning(f"""
-            **LOW SUPERHEAT** ({results['superheat']:.1f} K)
-            
-            TXV requires 3-8K superheat for proper operation.
-            
-            **Causes:**
-            1. Oversized evaporator
-            2. High water flow rate
-            3. TXV malfunction
-            
-            **Solutions:**
-            1. Adjust TXV setting
-            2. Reduce water flow
-            3. Check refrigerant charge
-            """)
-    
     # Design recommendations
     st.markdown("### 💡 Design Recommendations")
     
@@ -1549,24 +1681,55 @@ def display_results(results: Dict, inputs: Dict):
         **Adjust water flow rate accordingly.**
         """)
     
-    # Glycol recommendations
-    if results['glycol_percentage'] > 0:
-        st.info(f"""
-        **GLYCOL PROPERTIES**
+    # DX-specific warnings
+    if results["heat_exchanger_type"] == "DX Evaporator":
+        st.markdown("### ⚠️ DX-Specific Considerations")
         
-        **Type:** {results['glycol_type'].title()} Glycol {results['glycol_percentage']}%
-        **Freeze Point:** {results['freeze_point_c']:.1f}°C
+        if results['distribution_status'] == "Poor":
+            st.error(f"""
+            **POOR REFRIGERANT DISTRIBUTION**
+            
+            Flow per tube ({results['flow_per_tube_kg_hr']:.1f} kg/hr) is too low for good distribution.
+            
+            **Solutions:**
+            1. Reduce number of tubes
+            2. Increase refrigerant flow (if compressor allows)
+            3. Use enhanced distributor design
+            4. Consider individual TXVs per circuit
+            """)
         
-        **Maintenance Tips:**
-        1. Check glycol concentration annually
-        2. Monitor pH level (should be 7.5-9.0)
-        3. Replace glycol every 2-3 years
-        4. Use corrosion inhibitors
-        """)
-    
-    st.markdown("---")
+        if results['freeze_risk'] in ["High", "Medium"]:
+            st.warning(f"""
+            **FREEZE RISK DETECTED**
+            
+            Water outlet temperature ({results['t_sec_out']:.1f}°C) is close to freeze point ({results['freeze_point_c']:.1f}°C).
+            
+            **Recommendations:**
+            1. Increase glycol percentage
+            2. Increase water flow rate
+            3. Add freeze protection controls
+            4. Monitor temperature closely
+            """)
+        
+        if results['superheat'] < 3.0:
+            st.warning(f"""
+            **LOW SUPERHEAT** ({results['superheat']:.1f} K)
+            
+            TXV requires 3-8K superheat for proper operation.
+            
+            **Causes:**
+            1. Oversized evaporator
+            2. High water flow rate
+            3. TXV malfunction
+            
+            **Solutions:**
+            1. Adjust TXV setting
+            2. Reduce water flow
+            3. Check refrigerant charge
+            """)
     
     # Export results
+    st.markdown("---")
     st.markdown("### 📥 Export Design Report")
     
     if st.button("Download Engineering Report", type="primary"):
@@ -1652,16 +1815,16 @@ def main():
         st.stop()
     
     st.markdown("<h1 class='main-header'>🌡️ DX Shell & Tube Heat Exchanger Designer</h1>", unsafe_allow_html=True)
-    st.markdown("### Direct Expansion (DX) Evaporator & Condenser | Water/Glycol in Shell | Refrigerant in Tubes")
+    st.markdown("### Direct Expansion (DX) Evaporator & Condenser | kW or Mass Flow Input | Water/Glycol in Shell")
     
     # Important note
     st.info("""
     **🔧 This tool designs DX (Direct Expansion) type shell & tube heat exchangers:**
+    - **Two input methods:** Heat Duty (kW) OR Refrigerant Mass Flow
     - **Refrigerant flows inside tubes** (evaporates or condenses)
     - **Water/Glycol flows in shell side**
     - **Supports both Ethylene and Propylene (Food Grade) glycols**
-    - **Fixed refrigerant flow from compressor specs**
-    - **Adjustable water flow for optimization**
+    - **Manual number inputs with +/- buttons** for precise control
     """)
     
     # Initialize session state
@@ -1669,12 +1832,14 @@ def main():
         st.session_state.results = None
     if 'inputs' not in st.session_state:
         st.session_state.inputs = None
+    if 'design_method' not in st.session_state:
+        st.session_state.design_method = None
     
     # Create layout
     col1, col2 = st.columns([3, 1])
     
     with col2:
-        inputs = create_input_section()
+        inputs, design_method = create_input_section()
         
         # Calculate button
         button_label = "🚀 Calculate DX Design" if inputs["hex_type"] == "DX Evaporator" else "🚀 Calculate Condenser Design"
@@ -1687,25 +1852,34 @@ def main():
                 calc_inputs = inputs.copy()
                 calc_inputs["hex_type"] = calc_inputs["hex_type"].lower().replace("dx ", "")
                 
+                # Determine if using kW or mass flow
+                design_from_kw = (design_method == "Heat Duty (kW)")
+                
                 if calc_inputs["hex_type"] == "evaporator":
-                    results = designer.design_dx_evaporator(calc_inputs)
+                    results = designer.design_dx_evaporator(calc_inputs, design_from_kw)
                 else:
-                    results = designer.design_condenser(calc_inputs)
+                    results = designer.design_condenser(calc_inputs, design_from_kw)
                 
                 st.session_state.results = results
                 st.session_state.inputs = inputs
+                st.session_state.design_method = design_method
                 st.rerun()
         
         # Reset button
         if st.sidebar.button("🔄 Reset Design", use_container_width=True):
             st.session_state.results = None
             st.session_state.inputs = None
+            st.session_state.design_method = None
             st.rerun()
         
         # Quick tips
         st.sidebar.markdown("---")
         with st.sidebar.expander("💡 Design Tips"):
             st.markdown("""
+            **Input Methods:**
+            - **Heat Duty (kW):** Use when you know total cooling/heating load
+            - **Mass Flow:** Use when you have compressor specifications
+            
             **For DX Evaporators:**
             1. Ensure minimum 3K superheat for TXV
             2. Check refrigerant distribution
@@ -1716,41 +1890,40 @@ def main():
             2. Higher water temperatures reduce LMTD
             3. Consider fouling factors
             
-            **Glycol Selection:**
-            - **Ethylene:** Better performance, toxic
-            - **Propylene:** Food grade, slightly lower performance
-            
-            **Velocity Targets:**
-            - Water in shell: 0.6-1.2 m/s
-            - Glycol in shell: 0.4-0.9 m/s
-            - Two-phase refrigerant: 0.8-2.0 m/s
+            **Using +/- buttons:**
+            - Click buttons for quick adjustments
+            - Or type directly in number boxes
+            - All inputs support decimal values
             """)
     
     with col1:
         if st.session_state.results is not None:
-            display_results(st.session_state.results, st.session_state.inputs)
+            display_results(st.session_state.results, st.session_state.inputs, st.session_state.design_method)
         else:
             st.markdown("""
             ## 🔧 DX Heat Exchanger Design Tool
             
-            **Complete design tool for DX (Direct Expansion) shell & tube heat exchangers:**
+            **Complete design tool for DX (Direct Expansion) shell & tube heat exchangers with two input methods:**
             
-            ### **Supported Designs:**
+            ### **Two Input Methods:**
             
-            1. **DX Evaporators**
-               - Refrigerant evaporates inside tubes
-               - Water/glycol cools in shell side
-               - Superheat control considerations
-               - Refrigerant distribution analysis
-               - Freeze protection warnings
+            1. **Heat Duty (kW) Input:**
+               - Enter total cooling/heating load
+               - Program calculates required refrigerant flow
+               - Ideal for system design from load requirements
             
-            2. **Condensers**
-               - Refrigerant condenses inside tubes  
-               - Water/glycol heats in shell side
-               - Subcooling calculations
-               - Proper condensation correlations
+            2. **Refrigerant Mass Flow Input:**
+               - Enter compressor mass flow rate
+               - Program calculates heat duty
+               - Ideal for matching existing compressor
             
             ### **Enhanced Features:**
+            
+            ✅ **Manual Number Inputs:**
+               - **No sliders** - type any value directly
+               - **+/- buttons** for quick adjustments
+               - **Precise control** over all parameters
+               - **Decimal values** supported everywhere
             
             ✅ **Comprehensive Glycol Support:**
                - Ethylene Glycol (EG) - industrial use
@@ -1759,24 +1932,17 @@ def main():
                - Temperature-dependent properties
             
             ✅ **Advanced Engineering:**
-               - Gnielinski correlation for single-phase
                - Shah correlation for evaporation
                - Cavallini correlation for condensation
+               - Gnielinski correlation for single-phase
                - Friedel correlation for two-phase ΔP
-               - Bell-Delaware method for shell side
-            
-            ✅ **Realistic Design Approach:**
-               - Fixed refrigerant flow (from compressor)
-               - Adjustable water flow (user optimizes)
-               - Velocity-based recommendations
-               - DX-specific warnings
             
             ### **How to Use:**
             
             1. **Select heat exchanger type** (DX Evaporator or Condenser)
-            2. **Enter refrigerant parameters** from compressor specs
-            3. **Choose glycol type and percentage** (if needed)
-            4. **Set water flow rate** (use +/- buttons to adjust)
+            2. **Choose input method** (kW or Mass Flow)
+            3. **Enter parameters** using +/- buttons or direct typing
+            4. **Choose glycol type** and percentage (if needed)
             5. **Configure geometry** (tubes, pitch, layout)
             6. **Click Calculate** and review results
             7. **Optimize** based on recommendations
@@ -1789,8 +1955,8 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>🔧 <strong>DX Shell & Tube Heat Exchanger Designer</strong> | Direct Expansion Type | Refrigerant in Tubes</p>
-        <p>🧪 Supports Ethylene & Propylene Glycols | 🎯 Velocity-Based Design | 📊 Advanced Engineering Correlations</p>
+        <p>🔧 <strong>DX Shell & Tube Heat Exchanger Designer</strong> | kW & Mass Flow Input | Manual Number Inputs</p>
+        <p>🧪 Ethylene & Propylene Glycol Support | 🎯 +/- Button Controls | 📊 Advanced Engineering Correlations</p>
         <p>⚠️ For flooded evaporators (water in tubes), use separate design tool</p>
     </div>
     """, unsafe_allow_html=True)
