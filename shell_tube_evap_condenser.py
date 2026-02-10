@@ -40,7 +40,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS (same as before)
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -169,18 +169,34 @@ st.markdown("""
         margin: 0.5rem 0;
         border-left: 4px solid #F59E0B;
     }
+    .region-box {
+        background-color: #F8FAFC;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+        border-left: 4px solid #94A3B8;
+    }
+    .region-desuperheat {
+        border-left: 4px solid #F59E0B;
+    }
+    .region-condense {
+        border-left: 4px solid #3B82F6;
+    }
+    .region-subcool {
+        border-left: 4px solid #10B981;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 class DXHeatExchangerDesign:
     """DX (Direct Expansion) Shell & Tube Heat Exchanger Design"""
     
-    # Refrigerant properties database - Enhanced with enthalpy approximations
+    # Enhanced refrigerant properties database with saturation enthalpies approximation
     REFRIGERANTS = {
         "R134a": {
             "cp_vapor": 0.852,  # kJ/kg·K at 5°C
             "cp_liquid": 1.434,
-            "h_fg": 198.7,  # kJ/kg at saturation temp
+            "h_fg": 198.7,  # kJ/kg at ~5°C (will be adjusted for temperature)
             "rho_vapor": 14.43,  # kg/m³
             "rho_liquid": 1277.8,
             "mu_vapor": 1.11e-5,  # Pa·s
@@ -299,7 +315,7 @@ class DXHeatExchangerDesign:
         }
     }
     
-    # Enhanced water/glycol properties database (same as before)
+    # Water/glycol properties (same as before)
     ETHYLENE_GLYCOL_PROPERTIES = {
         0: {"cp": 4.186, "rho": 998.2, "mu": 0.00100, "k": 0.598, "pr": 7.01, "freeze_point": 0.0},
         10: {"cp": 4.080, "rho": 1022.0, "mu": 0.00132, "k": 0.570, "pr": 9.45, "freeze_point": -3.5},
@@ -320,7 +336,7 @@ class DXHeatExchangerDesign:
         60: {"cp": 3.350, "rho": 1044.0, "mu": 0.01600, "k": 0.475, "pr": 90.10, "freeze_point": -48.0}
     }
     
-    # Tube materials properties (same as before)
+    # Tube materials properties
     TUBE_MATERIALS = {
         "Copper": {"k": 386, "density": 8960, "cost_factor": 1.0, "corrosion_resistance": "Excellent"},
         "Cu-Ni 90/10": {"k": 40, "density": 8940, "cost_factor": 1.8, "corrosion_resistance": "Excellent"},
@@ -331,7 +347,7 @@ class DXHeatExchangerDesign:
         "Titanium": {"k": 22, "density": 4500, "cost_factor": 8.0, "corrosion_resistance": "Superior"}
     }
     
-    # Tube sizes (same as before)
+    # Tube sizes
     TUBE_SIZES = {
         "1/4\"": 0.00635,
         "3/8\"": 0.009525,
@@ -343,7 +359,7 @@ class DXHeatExchangerDesign:
         "1.5\"": 0.0381
     }
     
-    # Recommended velocities (same as before)
+    # Recommended velocities
     RECOMMENDED_VELOCITIES = {
         "water_tubes": {"min": 0.6, "opt": 1.2, "max": 2.5},
         "water_shell": {"min": 0.3, "opt": 0.8, "max": 1.5},
@@ -356,11 +372,11 @@ class DXHeatExchangerDesign:
     
     def __init__(self):
         self.results = {}
-        self.glycol_type = "ethylene"  # Default
+        self.glycol_type = "ethylene"
     
     def calculate_water_glycol_properties(self, temperature: float, glycol_percentage: int, 
                                         glycol_type: str = "ethylene") -> Dict:
-        """Calculate water/glycol mixture properties with temperature correction"""
+        """Calculate water/glycol mixture properties"""
         if glycol_type.lower() == "propylene":
             base_props = self.PROPYLENE_GLYCOL_PROPERTIES.get(glycol_percentage, 
                                                            self.PROPYLENE_GLYCOL_PROPERTIES[0])
@@ -368,45 +384,31 @@ class DXHeatExchangerDesign:
             base_props = self.ETHYLENE_GLYCOL_PROPERTIES.get(glycol_percentage, 
                                                            self.ETHYLENE_GLYCOL_PROPERTIES[0])
         
-        # Store glycol type
         self.glycol_type = glycol_type.lower()
         
-        # Temperature correction factors
-        T_ref = 20.0  # Reference temperature
-        
-        # Temperature dependent corrections
-        T_K = temperature + 273.15
-        T_ref_K = T_ref + 273.15
-        
-        # Specific heat correction
+        # Temperature corrections
+        T_ref = 20.0
         cp_factor = 1.0 - 0.0005 * (temperature - T_ref)
-        
-        # Density correction
         rho_factor = 1.0 - 0.0002 * (temperature - T_ref)
         
-        # Viscosity correction
         if temperature > T_ref:
             mu_factor = math.exp(-0.025 * (temperature - T_ref))
         else:
             mu_factor = math.exp(0.035 * (T_ref - temperature))
         
-        # Thermal conductivity correction
         k_factor = 1.0 + 0.0018 * (temperature - T_ref)
         
-        # Calculate corrected properties
-        cp_corrected = base_props["cp"] * cp_factor * 1000  # Convert to J/kg·K
+        cp_corrected = base_props["cp"] * cp_factor * 1000
         rho_corrected = base_props["rho"] * rho_factor
         mu_corrected = base_props["mu"] * mu_factor
         k_corrected = base_props["k"] * k_factor
-        
-        # Calculate Prandtl number
         pr_corrected = mu_corrected * cp_corrected / k_corrected
         
         return {
-            "cp": cp_corrected,  # J/kg·K
-            "rho": rho_corrected,  # kg/m³
-            "mu": mu_corrected,  # Pa·s
-            "k": k_corrected,  # W/m·K
+            "cp": cp_corrected,
+            "rho": rho_corrected,
+            "mu": mu_corrected,
+            "k": k_corrected,
             "pr": pr_corrected,
             "freeze_point": base_props["freeze_point"],
             "glycol_type": glycol_type,
@@ -423,89 +425,29 @@ class DXHeatExchangerDesign:
                                                        self.ETHYLENE_GLYCOL_PROPERTIES[0])
         return props["freeze_point"]
     
-    def calculate_condenser_kw_required(self, m_dot_ref: float, T_ref_in_superheated: float, 
-                                      T_cond: float, T_subcool_req: float, refrigerant: str) -> Dict:
-        """
-        Calculate required kW for condenser
-        Process: Superheated vapor → Saturated vapor → Saturated liquid → Subcooled liquid
-        """
-        ref_props = self.REFRIGERANTS[refrigerant]
-        
-        # 1. Desuperheating from T_ref_in_superheated to T_cond (superheated vapor to saturated vapor)
-        if T_ref_in_superheated > T_cond:
-            Q_desuperheat = m_dot_ref * ref_props["cp_vapor"] * (T_ref_in_superheated - T_cond)
-        else:
-            Q_desuperheat = 0
-        
-        # 2. Latent heat (condensing at T_cond)
-        Q_latent = m_dot_ref * ref_props["h_fg"]
-        
-        # 3. Subcooling from T_cond to T_subcooled (saturated liquid to subcooled liquid)
-        T_subcooled = T_cond - T_subcool_req
-        Q_subcool = m_dot_ref * ref_props["cp_liquid"] * T_subcool_req
-        
-        # Total required kW
-        Q_total = Q_desuperheat + Q_latent + Q_subcool
-        
-        return {
-            "kw_required": Q_total,
-            "kw_desuperheat": Q_desuperheat,
-            "kw_latent": Q_latent,
-            "kw_subcool": Q_subcool,
-            "T_subcooled_req": T_subcooled
-        }
+    # ==================== HEAT TRANSFER CORRELATIONS ====================
     
-    def calculate_evaporator_kw_required(self, m_dot_ref: float, T_evap: float, 
-                                       inlet_quality: float, superheat_req: float, 
-                                       refrigerant: str) -> Dict:
-        """
-        Calculate required kW for evaporator
-        Process: Two-phase (quality) → Saturated vapor → Superheated vapor
-        """
-        ref_props = self.REFRIGERANTS[refrigerant]
-        
-        # Convert quality from percentage to fraction
-        x_in = inlet_quality / 100.0
-        
-        # 1. Latent heat (evaporating remaining liquid)
-        # If inlet quality is x, then remaining liquid fraction is (1-x)
-        # Heat required to completely evaporate: (1-x) * h_fg
-        Q_latent = m_dot_ref * (1 - x_in) * ref_props["h_fg"]
-        
-        # 2. Superheating from T_evap to T_superheated
-        Q_superheat = m_dot_ref * ref_props["cp_vapor"] * superheat_req
-        
-        # Total required kW
-        Q_total = Q_latent + Q_superheat
-        
-        # Outlet temperature
-        T_superheated = T_evap + superheat_req
-        
-        return {
-            "kw_required": Q_total,
-            "kw_latent": Q_latent,
-            "kw_superheat": Q_superheat,
-            "inlet_quality": inlet_quality,
-            "T_superheated_req": T_superheated
-        }
-    
-    def gnielinski_single_phase(self, Re: float, Pr: float) -> float:
+    def gnielinski_single_phase(self, Re: float, Pr: float, f: float = None) -> float:
         """Gnielinski correlation for single-phase turbulent flow"""
         if Re < 2300:
+            # Laminar flow - constant heat flux
             return 4.36
         elif Re < 3000:
+            # Transition region
             Nu_lam = 4.36
             Nu_3000 = 0.023 * 3000**0.8 * Pr**0.4
             return Nu_lam + (Re - 2300) / 700 * (Nu_3000 - Nu_lam)
         else:
-            f = (0.79 * math.log(Re) - 1.64)**-2
+            # Turbulent flow
+            if f is None:
+                f = (0.79 * math.log(Re) - 1.64)**-2
             Nu = (f/8) * (Re - 1000) * Pr / (1 + 12.7 * (f/8)**0.5 * (Pr**(2/3) - 1))
-            return Nu
+            return max(Nu, 4.36)
     
     def shah_evaporation(self, Re_l: float, Pr_l: float, x: float, 
                         rho_l: float, rho_v: float, D: float, G: float, 
                         h_fg: float, k_l: float) -> float:
-        """Shah correlation for flow boiling in tubes (DX evaporator)"""
+        """Shah correlation for flow boiling in tubes"""
         if x <= 0:
             return self.gnielinski_single_phase(Re_l, Pr_l) * k_l / D
         
@@ -532,42 +474,935 @@ class DXHeatExchangerDesign:
         
         return Nu_tp * k_l / D
     
-    def cavallini_condensation(self, Re_l: float, Re_v: float, Pr_l: float, x: float,
-                             rho_l: float, rho_v: float, mu_l: float, mu_v: float,
-                             D: float, k_l: float) -> float:
-        """Cavallini-Zecchin correlation for condensation in tubes"""
-        X_tt = ((1 - x) / x)**0.9 * (rho_v / rho_l)**0.5 * (mu_l / mu_v)**0.1 if x > 0 else 1e6
+    def dobson_chato_condensation(self, G: float, D: float, T_sat: float, 
+                                rho_l: float, rho_v: float, mu_l: float, 
+                                k_l: float, cp_l: float, h_fg: float, 
+                                x: float, quality_type: str = "average") -> float:
+        """
+        Dobson & Chato correlation for condensation in horizontal tubes
+        Returns HTC in W/m²K
+        """
+        # Wall temperature assumption (5K below saturation for condensation)
+        delta_T = 5.0  # K
         
-        Re_lo = Re_l * (1 - x) if x < 1 else Re_l
-        Nu_lo = self.gnielinski_single_phase(Re_lo, Pr_l)
+        # Modified latent heat (accounts for liquid subcooling in film)
+        h_fg_prime = h_fg * 1000 + 0.68 * cp_l * delta_T
         
-        if X_tt <= 10:
-            phi_l = 1 + 1.8 / X_tt**0.87
-        else:
-            phi_l = 1.0
+        # Gravitational acceleration
+        g = 9.81  # m/s²
         
-        Nu_tp = Nu_lo * phi_l
+        # Calculate void fraction for quality adjustment
+        alpha = 1 / (1 + ((1 - x) / x) * (rho_v / rho_l)**0.667)
         
-        return Nu_tp * k_l / D
+        # Nusselt number for film condensation (simplified)
+        Nu_film = 0.555 * ((g * rho_l * (rho_l - rho_v) * k_l**3 * h_fg_prime) / 
+                          (mu_l * D * delta_T))**0.25
+        
+        # Convective enhancement for higher mass flux and quality
+        if quality_type == "inlet" and x > 0.7:
+            # At inlet where quality is high
+            Re_v = G * D / mu_l * x if mu_l > 0 else 0
+            if Re_v > 0:
+                enhancement = 1 + 0.8 * (x**0.8) * (Re_v/1000)**0.2
+                Nu_film *= enhancement
+        
+        h_tp = Nu_film * k_l / D
+        
+        # Ensure reasonable bounds for condensation HTC
+        h_tp = max(h_tp, 1000)  # Minimum 1000 W/m²K for condensation
+        h_tp = min(h_tp, 8000)  # Maximum 8000 W/m²K
+        
+        return h_tp
     
-    def friedel_two_phase_pressure_drop(self, Re_l: float, Re_v: float, x: float,
-                                      rho_l: float, rho_v: float, mu_l: float,
-                                      mu_v: float, D: float, G: float, L: float) -> float:
-        """Friedel correlation for two-phase frictional pressure drop"""
-        f_lo = (0.79 * math.log(Re_l) - 1.64)**-2 if Re_l > 2300 else 64/Re_l
+    def calculate_single_phase_htc(self, m_dot: float, D: float, rho: float, 
+                                 mu: float, k: float, cp: float, 
+                                 n_passes: int = 1) -> float:
+        """Calculate single-phase HTC using Gnielinski correlation"""
+        # Flow area per pass
+        A_flow = math.pi * D**2 / 4
         
-        Fr = G**2 / (9.81 * D * rho_l**2)
-        We = G**2 * D / (rho_l * 0.001)
+        # Velocity
+        if n_passes > 0:
+            v = m_dot / (rho * A_flow * n_passes)
+        else:
+            v = m_dot / (rho * A_flow)
         
-        A = (1 - x)**2 + x**2 * (rho_l * f_lo) / (rho_v * f_lo)
-        B = x**0.78 * (1 - x)**0.224
-        C = (rho_l / rho_v)**0.91 * (mu_v / mu_l)**0.19 * (1 - mu_v / mu_l)**0.7
+        # Reynolds number
+        Re = rho * v * D / mu if mu > 0 else 0
         
-        phi_lo2 = A + 3.24 * B * C / (Fr**0.045 * We**0.035)
-        dp_dz_lo = 2 * f_lo * G**2 / (D * rho_l)
-        dp_dz_tp = dp_dz_lo * phi_lo2
+        # Prandtl number
+        Pr = mu * cp / k if k > 0 else 0
         
-        return dp_dz_tp * L
+        # Nusselt number
+        if Re > 0 and Pr > 0:
+            Nu = self.gnielinski_single_phase(Re, Pr)
+            h = Nu * k / D
+        else:
+            h = 100  # Default low value
+        
+        return h
+    
+    # ==================== ε-NTU METHOD IMPLEMENTATION ====================
+    
+    def epsilon_ntu_counterflow(self, NTU: float, C_r: float) -> float:
+        """ε-NTU relationship for counterflow heat exchanger"""
+        if C_r < 1e-6:  # C_min/C_max ≈ 0 (phase change)
+            epsilon = 1 - math.exp(-NTU)
+        elif abs(1 - C_r) < 1e-6:  # C_r = 1
+            epsilon = NTU / (1 + NTU)
+        else:
+            epsilon = (1 - math.exp(-NTU * (1 - C_r))) / (1 - C_r * math.exp(-NTU * (1 - C_r)))
+        return epsilon
+    
+    def calculate_condenser_three_region(self, m_dot_ref: float, m_dot_water: float,
+                                       T_ref_in: float, T_cond: float, T_subcool_req: float,
+                                       T_water_in: float, ref_props: Dict, water_props: Dict,
+                                       tube_id: float, shell_h: float, tube_k: float,
+                                       n_tubes: int, tube_length: float, n_passes: int,
+                                       R_fouling: float = 0.00035) -> Dict:
+        """
+        Calculate condenser performance using ε-NTU method with three regions
+        """
+        # 1. Calculate required heat duties
+        Q_desuperheat_req = m_dot_ref * ref_props["cp_vapor"] * 1000 * (T_ref_in - T_cond)  # W
+        Q_latent_req = m_dot_ref * ref_props["h_fg"] * 1000  # W
+        Q_subcool_req = m_dot_ref * ref_props["cp_liquid"] * 1000 * (T_cond - (T_cond - T_subcool_req))  # W
+        Q_total_req = Q_desuperheat_req + Q_latent_req + Q_subcool_req
+        
+        # Subcooled outlet temperature
+        T_subcooled_req = T_cond - T_subcool_req
+        
+        # 2. Calculate heat capacity rates
+        C_ref_desuperheat = m_dot_ref * ref_props["cp_vapor"] * 1000  # W/K
+        C_ref_subcool = m_dot_ref * ref_props["cp_liquid"] * 1000  # W/K
+        C_water = m_dot_water * water_props["cp"]  # W/K
+        
+        # 3. Total heat transfer area
+        tube_od = tube_id * 1.2  # Estimate OD from ID
+        A_total = math.pi * tube_od * tube_length * n_tubes
+        
+        # 4. Calculate HTCs for each region
+        
+        # Mass flux for tube-side calculations
+        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / max(n_passes, 1)
+        G_ref = m_dot_ref / A_flow_tube if A_flow_tube > 0 else 0
+        
+        # Region 1: Desuperheating (vapor cooling)
+        h_desuperheat = self.calculate_single_phase_htc(
+            m_dot_ref, tube_id, ref_props["rho_vapor"], 
+            ref_props["mu_vapor"], ref_props["k_vapor"],
+            ref_props["cp_vapor"] * 1000, n_passes
+        )
+        
+        # Region 2: Condensing (two-phase)
+        # Use quality = 0.8 (near inlet where most condensation occurs)
+        h_condense = self.dobson_chato_condensation(
+            G_ref, tube_id, T_cond,
+            ref_props["rho_liquid"], ref_props["rho_vapor"],
+            ref_props["mu_liquid"], ref_props["k_liquid"],
+            ref_props["cp_liquid"] * 1000, ref_props["h_fg"] * 1000,
+            x=0.8, quality_type="inlet"
+        )
+        
+        # Region 3: Subcooling (liquid cooling)
+        h_subcool = self.calculate_single_phase_htc(
+            m_dot_ref, tube_id, ref_props["rho_liquid"], 
+            ref_props["mu_liquid"], ref_props["k_liquid"],
+            ref_props["cp_liquid"] * 1000, n_passes
+        )
+        
+        # Shell-side HTC (same for all regions)
+        h_shell = shell_h
+        
+        # 5. Calculate overall U for each region
+        R_wall = tube_od * math.log(tube_od / tube_id) / (2 * tube_k) if tube_k > 0 else 0
+        
+        U_desuperheat = 1 / (1/h_desuperheat + 1/h_shell + R_wall + R_fouling)
+        U_condense = 1 / (1/h_condense + 1/h_shell + R_wall + R_fouling)
+        U_subcool = 1 / (1/h_subcool + 1/h_shell + R_wall + R_fouling)
+        
+        # 6. Estimate area distribution based on heat duty
+        if Q_total_req > 0:
+            A_desuperheat = A_total * Q_desuperheat_req / Q_total_req
+            A_condense = A_total * Q_latent_req / Q_total_req
+            A_subcool = A_total * Q_subcool_req / Q_total_req
+        else:
+            # Default distribution if Q_total is 0
+            A_desuperheat = A_total * 0.1
+            A_condense = A_total * 0.8
+            A_subcool = A_total * 0.1
+        
+        # Ensure areas sum to A_total
+        A_sum = A_desuperheat + A_condense + A_subcool
+        if A_sum > 0:
+            A_desuperheat = A_desuperheat * A_total / A_sum
+            A_condense = A_condense * A_total / A_sum
+            A_subcool = A_subcool * A_total / A_sum
+        
+        # 7. ε-NTU calculation for each region (iterative approach)
+        
+        # Initialize temperatures
+        T_water_1 = T_water_in
+        Q1_achieved = 0
+        Q2_achieved = 0
+        Q3_achieved = 0
+        
+        # Region 1: Desuperheating (both streams finite capacity)
+        C_min1 = min(C_ref_desuperheat, C_water)
+        C_max1 = max(C_ref_desuperheat, C_water)
+        C_r1 = C_min1 / C_max1 if C_max1 > 0 else 0
+        
+        NTU1 = U_desuperheat * A_desuperheat / C_min1 if C_min1 > 0 else 0
+        epsilon1 = self.epsilon_ntu_counterflow(NTU1, C_r1)
+        
+        Q_max1 = C_min1 * (T_ref_in - T_water_1)
+        Q1_achieved = epsilon1 * Q_max1
+        
+        # Water temperature after region 1
+        T_water_2 = T_water_1 + Q1_achieved / C_water if C_water > 0 else T_water_1
+        
+        # Refrigerant temperature after region 1 (should be T_cond)
+        T_ref_after1 = T_ref_in - Q1_achieved / C_ref_desuperheat if C_ref_desuperheat > 0 else T_cond
+        T_ref_after1 = max(T_ref_after1, T_cond)  # Cannot go below condensing temp
+        
+        # Region 2: Condensing (refrigerant capacity → ∞)
+        # For condensation, C_min = C_water, C_r = 0
+        NTU2 = U_condense * A_condense / C_water if C_water > 0 else 0
+        epsilon2 = 1 - math.exp(-NTU2)
+        
+        Q_max2 = C_water * (T_cond - T_water_2)
+        Q2_achieved = epsilon2 * Q_max2
+        
+        # Water temperature after region 2
+        T_water_3 = T_water_2 + Q2_achieved / C_water if C_water > 0 else T_water_2
+        
+        # Region 3: Subcooling (both streams finite capacity)
+        C_min3 = min(C_ref_subcool, C_water)
+        C_max3 = max(C_ref_subcool, C_water)
+        C_r3 = C_min3 / C_max3 if C_max3 > 0 else 0
+        
+        NTU3 = U_subcool * A_subcool / C_min3 if C_min3 > 0 else 0
+        epsilon3 = self.epsilon_ntu_counterflow(NTU3, C_r3)
+        
+        Q_max3 = C_min3 * (T_cond - T_water_3)
+        Q3_achieved = epsilon3 * Q_max3
+        
+        # Water outlet temperature
+        T_water_out = T_water_3 + Q3_achieved / C_water if C_water > 0 else T_water_3
+        
+        # Refrigerant outlet temperature (subcooled)
+        Q_subcool_actual = min(Q3_achieved, Q_subcool_req)  # Cannot subcool more than available
+        T_ref_out = T_cond - Q_subcool_actual / C_ref_subcool if C_ref_subcool > 0 else T_subcooled_req
+        
+        # Total achieved heat transfer
+        Q_total_achieved = Q1_achieved + Q2_achieved + Q3_achieved
+        
+        # Overall effectiveness
+        Q_max_total = C_water * (T_ref_in - T_water_in) if C_water > 0 else 0
+        epsilon_overall = Q_total_achieved / Q_max_total if Q_max_total > 0 else 0
+        
+        # Overall NTU
+        U_avg = (U_desuperheat * A_desuperheat + U_condense * A_condense + U_subcool * A_subcool) / A_total
+        NTU_overall = U_avg * A_total / C_water if C_water > 0 else 0
+        
+        # Calculate LMTD for reporting (simplified)
+        if T_ref_in > T_water_out and T_ref_out > T_water_in:
+            dt1 = T_ref_in - T_water_out
+            dt2 = T_ref_out - T_water_in
+            if abs(dt1 - dt2) > 1e-6:
+                LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
+            else:
+                LMTD = (dt1 + dt2) / 2
+        else:
+            LMTD = 0
+        
+        return {
+            # Heat duties
+            "Q_total_req": Q_total_req / 1000,  # kW
+            "Q_total_achieved": Q_total_achieved / 1000,  # kW
+            "Q_desuperheat_req": Q_desuperheat_req / 1000,
+            "Q_latent_req": Q_latent_req / 1000,
+            "Q_subcool_req": Q_subcool_req / 1000,
+            "Q_desuperheat_achieved": Q1_achieved / 1000,
+            "Q_latent_achieved": Q2_achieved / 1000,
+            "Q_subcool_achieved": Q3_achieved / 1000,
+            
+            # Temperatures
+            "T_water_in": T_water_in,
+            "T_water_out": T_water_out,
+            "T_ref_in": T_ref_in,
+            "T_ref_out": T_ref_out,
+            "T_ref_out_req": T_subcooled_req,
+            "T_cond": T_cond,
+            
+            # Heat transfer coefficients
+            "h_desuperheat": h_desuperheat,
+            "h_condense": h_condense,
+            "h_subcool": h_subcool,
+            "h_shell": h_shell,
+            "U_desuperheat": U_desuperheat,
+            "U_condense": U_condense,
+            "U_subcool": U_subcool,
+            "U_avg": U_avg,
+            
+            # Areas
+            "A_total": A_total,
+            "A_desuperheat": A_desuperheat,
+            "A_condense": A_condense,
+            "A_subcool": A_subcool,
+            
+            # Performance metrics
+            "epsilon_overall": epsilon_overall,
+            "NTU_overall": NTU_overall,
+            "LMTD": LMTD,
+            "NTU1": NTU1,
+            "NTU2": NTU2,
+            "NTU3": NTU3,
+            "epsilon1": epsilon1,
+            "epsilon2": epsilon2,
+            "epsilon3": epsilon3,
+            
+            # Additional info
+            "C_water": C_water,
+            "C_ref_desuperheat": C_ref_desuperheat,
+            "C_ref_subcool": C_ref_subcool,
+            "G_ref": G_ref
+        }
+    
+    def calculate_evaporator_two_region(self, m_dot_ref: float, m_dot_water: float,
+                                      T_evap: float, inlet_quality: float, superheat_req: float,
+                                      T_water_in: float, ref_props: Dict, water_props: Dict,
+                                      tube_id: float, shell_h: float, tube_k: float,
+                                      n_tubes: int, tube_length: float, n_passes: int,
+                                      R_fouling: float = 0.00035) -> Dict:
+        """
+        Calculate evaporator performance using ε-NTU method with two regions
+        """
+        # Convert quality from percentage to fraction
+        x_in = inlet_quality / 100.0
+        
+        # 1. Calculate required heat duties
+        # Latent heat: evaporate remaining liquid (1 - x_in)
+        Q_latent_req = m_dot_ref * (1 - x_in) * ref_props["h_fg"] * 1000  # W
+        
+        # Superheating
+        T_superheated_req = T_evap + superheat_req
+        Q_superheat_req = m_dot_ref * ref_props["cp_vapor"] * 1000 * superheat_req  # W
+        
+        Q_total_req = Q_latent_req + Q_superheat_req
+        
+        # 2. Calculate heat capacity rates
+        # For evaporation region: refrigerant capacity → ∞ (phase change)
+        # For superheat region: finite capacity
+        C_ref_superheat = m_dot_ref * ref_props["cp_vapor"] * 1000  # W/K
+        C_water = m_dot_water * water_props["cp"]  # W/K
+        
+        # 3. Total heat transfer area
+        tube_od = tube_id * 1.2  # Estimate OD from ID
+        A_total = math.pi * tube_od * tube_length * n_tubes
+        
+        # 4. Calculate HTCs for each region
+        
+        # Mass flux for tube-side calculations
+        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / max(n_passes, 1)
+        G_ref = m_dot_ref / A_flow_tube if A_flow_tube > 0 else 0
+        
+        # Region 1: Evaporation (two-phase)
+        # Use average quality
+        x_avg = (x_in + 1.0) / 2.0
+        Re_l = G_ref * tube_id / ref_props["mu_liquid"] if ref_props["mu_liquid"] > 0 else 0
+        Pr_l = ref_props["pr_liquid"]
+        
+        h_evap = self.shah_evaporation(
+            Re_l, Pr_l, x_avg,
+            ref_props["rho_liquid"], ref_props["rho_vapor"],
+            tube_id, G_ref, ref_props["h_fg"] * 1000,
+            ref_props["k_liquid"]
+        )
+        
+        # Region 2: Superheating (vapor heating)
+        h_superheat = self.calculate_single_phase_htc(
+            m_dot_ref, tube_id, ref_props["rho_vapor"], 
+            ref_props["mu_vapor"], ref_props["k_vapor"],
+            ref_props["cp_vapor"] * 1000, n_passes
+        )
+        
+        # Shell-side HTC
+        h_shell = shell_h
+        
+        # 5. Calculate overall U for each region
+        R_wall = tube_od * math.log(tube_od / tube_id) / (2 * tube_k) if tube_k > 0 else 0
+        
+        U_evap = 1 / (1/h_evap + 1/h_shell + R_wall + R_fouling)
+        U_superheat = 1 / (1/h_superheat + 1/h_shell + R_wall + R_fouling)
+        
+        # 6. Estimate area distribution based on heat duty
+        if Q_total_req > 0:
+            A_evap = A_total * Q_latent_req / Q_total_req
+            A_superheat = A_total * Q_superheat_req / Q_total_req
+        else:
+            A_evap = A_total * 0.8
+            A_superheat = A_total * 0.2
+        
+        # Ensure areas sum to A_total
+        A_sum = A_evap + A_superheat
+        if A_sum > 0:
+            A_evap = A_evap * A_total / A_sum
+            A_superheat = A_superheat * A_total / A_sum
+        
+        # 7. ε-NTU calculation for each region
+        
+        # Initialize temperatures (counterflow assumed)
+        # For evaporator: water enters hot, leaves cold
+        
+        # Region 1: Evaporation (refrigerant capacity → ∞)
+        # Water temperature entering evaporation region (after superheat region in counterflow)
+        # For simplicity, assume linear temperature distribution
+        
+        # First pass: calculate with estimated temperatures
+        T_water_mid_est = T_water_in - (Q_latent_req / C_water) if C_water > 0 else T_water_in
+        T_water_mid_est = max(T_water_mid_est, T_evap + 5)  # Minimum approach
+        
+        # Evaporation region (C_ref → ∞)
+        NTU_evap = U_evap * A_evap / C_water if C_water > 0 else 0
+        epsilon_evap = 1 - math.exp(-NTU_evap)
+        
+        Q_max_evap = C_water * (T_water_mid_est - T_evap)
+        Q_evap_achieved = epsilon_evap * Q_max_evap
+        
+        # Water temperature after evaporation
+        T_water_after_evap = T_water_mid_est - Q_evap_achieved / C_water if C_water > 0 else T_water_mid_est
+        
+        # Region 2: Superheating (both streams finite capacity)
+        C_min_superheat = min(C_ref_superheat, C_water)
+        C_max_superheat = max(C_ref_superheat, C_water)
+        C_r_superheat = C_min_superheat / C_max_superheat if C_max_superheat > 0 else 0
+        
+        NTU_superheat = U_superheat * A_superheat / C_min_superheat if C_min_superheat > 0 else 0
+        epsilon_superheat = self.epsilon_ntu_counterflow(NTU_superheat, C_r_superheat)
+        
+        Q_max_superheat = C_min_superheat * (T_water_after_evap - T_evap)
+        Q_superheat_achieved = epsilon_superheat * Q_max_superheat
+        
+        # Water outlet temperature
+        T_water_out = T_water_after_evap - Q_superheat_achieved / C_water if C_water > 0 else T_water_after_evap
+        
+        # Refrigerant outlet temperature (superheated)
+        T_ref_out = T_evap + Q_superheat_achieved / C_ref_superheat if C_ref_superheat > 0 else T_superheated_req
+        
+        # Total achieved heat transfer
+        Q_total_achieved = Q_evap_achieved + Q_superheat_achieved
+        
+        # Overall effectiveness
+        Q_max_total = C_water * (T_water_in - T_evap) if C_water > 0 else 0
+        epsilon_overall = Q_total_achieved / Q_max_total if Q_max_total > 0 else 0
+        
+        # Overall NTU
+        U_avg = (U_evap * A_evap + U_superheat * A_superheat) / A_total
+        NTU_overall = U_avg * A_total / C_water if C_water > 0 else 0
+        
+        # Calculate LMTD
+        dt1 = T_water_in - T_ref_out
+        dt2 = T_water_out - T_evap
+        if dt1 > 0 and dt2 > 0 and abs(dt1 - dt2) > 1e-6:
+            LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
+        else:
+            LMTD = (dt1 + dt2) / 2
+        
+        return {
+            # Heat duties
+            "Q_total_req": Q_total_req / 1000,  # kW
+            "Q_total_achieved": Q_total_achieved / 1000,  # kW
+            "Q_latent_req": Q_latent_req / 1000,
+            "Q_superheat_req": Q_superheat_req / 1000,
+            "Q_latent_achieved": Q_evap_achieved / 1000,
+            "Q_superheat_achieved": Q_superheat_achieved / 1000,
+            
+            # Temperatures
+            "T_water_in": T_water_in,
+            "T_water_out": T_water_out,
+            "T_ref_in": T_evap,  # Evaporating temperature
+            "T_ref_out": T_ref_out,
+            "T_ref_out_req": T_superheated_req,
+            "T_evap": T_evap,
+            
+            # Heat transfer coefficients
+            "h_evap": h_evap,
+            "h_superheat": h_superheat,
+            "h_shell": h_shell,
+            "U_evap": U_evap,
+            "U_superheat": U_superheat,
+            "U_avg": U_avg,
+            
+            # Areas
+            "A_total": A_total,
+            "A_evap": A_evap,
+            "A_superheat": A_superheat,
+            
+            # Performance metrics
+            "epsilon_overall": epsilon_overall,
+            "NTU_overall": NTU_overall,
+            "LMTD": LMTD,
+            "NTU_evap": NTU_evap,
+            "NTU_superheat": NTU_superheat,
+            "epsilon_evap": epsilon_evap,
+            "epsilon_superheat": epsilon_superheat,
+            
+            # Additional info
+            "C_water": C_water,
+            "C_ref_superheat": C_ref_superheat,
+            "G_ref": G_ref,
+            "inlet_quality": inlet_quality
+        }
+    
+    # ==================== MAIN DESIGN FUNCTIONS ====================
+    
+    def design_dx_evaporator(self, inputs: Dict) -> Dict:
+        """Design DX evaporator using ε-NTU method"""
+        
+        # Extract inputs
+        refrigerant = inputs["refrigerant"]
+        m_dot_ref = inputs["m_dot_ref"]  # kg/s
+        T_evap = inputs["T_ref"]
+        superheat_req = inputs["delta_T_sh_sc"]
+        inlet_quality = inputs.get("inlet_quality", 20)  # percentage
+        
+        # Water/glycol side
+        glycol_percent = inputs["glycol_percentage"]
+        glycol_type = inputs.get("glycol_type", "ethylene")
+        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/s to kg/s
+        T_sec_in = inputs["T_sec_in"]
+        
+        # Geometry
+        tube_size = inputs["tube_size"]
+        tube_material = inputs["tube_material"]
+        tube_thickness = inputs["tube_thickness"] / 1000  # m
+        tube_pitch = inputs["tube_pitch"] / 1000  # m
+        n_passes = inputs["n_passes"]
+        n_baffles = inputs["n_baffles"]
+        n_tubes = inputs["n_tubes"]
+        tube_length = inputs["tube_length"]
+        tube_layout = inputs["tube_layout"].lower()
+        
+        # Get fluid properties
+        ref_props = self.REFRIGERANTS[refrigerant]
+        sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
+        
+        # Convert secondary flow to kg/s
+        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
+        
+        # Tube dimensions
+        tube_od = self.TUBE_SIZES[tube_size]
+        tube_id = max(tube_od - 2 * tube_thickness, tube_od * 0.8)
+        
+        # Calculate shell diameter and shell-side HTC
+        shell_diameter = self.calculate_shell_diameter(tube_od, n_tubes, tube_pitch, tube_layout)
+        
+        # Calculate equivalent diameter for shell side
+        if tube_layout == "triangular":
+            D_e = 4 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2) / (math.pi * tube_od)
+        else:
+            D_e = 4 * (tube_pitch**2 - 0.25 * math.pi * tube_od**2) / (math.pi * tube_od)
+        
+        # Calculate shell-side flow area and velocity
+        shell_cross_area = math.pi * shell_diameter**2 / 4
+        tube_bundle_area = n_tubes * math.pi * tube_od**2 / 4
+        shell_flow_area = (shell_cross_area - tube_bundle_area) * 0.4
+        
+        # Shell-side mass flux and Reynolds
+        G_sec = m_dot_sec_kg / shell_flow_area if shell_flow_area > 0 else 0
+        Re_shell = G_sec * D_e / sec_props["mu"]
+        
+        # Shell-side HTC
+        h_shell = self.calculate_shell_side_htc(Re_shell, sec_props["pr"], D_e, sec_props["k"], tube_layout)
+        
+        # Tube material thermal conductivity
+        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
+        
+        # Calculate evaporator performance using ε-NTU method
+        results = self.calculate_evaporator_two_region(
+            m_dot_ref, m_dot_sec_kg, T_evap, inlet_quality, superheat_req,
+            T_sec_in, ref_props, sec_props, tube_id, h_shell, tube_k,
+            n_tubes, tube_length, n_passes
+        )
+        
+        # Calculate additional parameters
+        baffle_spacing = tube_length / (n_baffles + 1)
+        
+        # Flow velocities
+        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / max(n_passes, 1)
+        G_ref = m_dot_ref / A_flow_tube if A_flow_tube > 0 else 0
+        
+        # For two-phase flow, use homogeneous density
+        x_avg = (inlet_quality/100.0 + 1.0) / 2.0
+        rho_tp = 1 / (x_avg/ref_props["rho_vapor"] + (1-x_avg)/ref_props["rho_liquid"])
+        v_ref = G_ref / rho_tp
+        v_sec = G_sec / sec_props["rho"]
+        
+        # Pressure drops (simplified)
+        # Tube side (two-phase evaporation) - simplified calculation
+        Re_l = G_ref * tube_id / ref_props["mu_liquid"] if ref_props["mu_liquid"] > 0 else 0
+        if Re_l > 2300:
+            f_tube = (0.79 * math.log(Re_l) - 1.64)**-2
+        else:
+            f_tube = 64 / Re_l if Re_l > 0 else 0.05
+        
+        # Two-phase multiplier (simplified)
+        phi_tp = 1 + 2.5 / x_avg if x_avg > 0 else 1
+        dp_tube = f_tube * (tube_length * n_passes / tube_id) * (rho_tp * v_ref**2 / 2) * phi_tp
+        
+        # Shell side pressure drop
+        if Re_shell < 2300:
+            f_shell = 64 / Re_shell if Re_shell > 0 else 0.2
+        else:
+            f_shell = 0.2 * Re_shell**-0.2
+        
+        dp_shell = f_shell * (tube_length / D_e) * n_baffles * (sec_props["rho"] * v_sec**2 / 2)
+        
+        # Check velocities
+        sec_velocity_status = self.check_velocity_status(v_sec, glycol_percent, "shell")
+        ref_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant_two_phase")
+        
+        # Refrigerant distribution check
+        m_dot_per_tube = m_dot_ref / n_tubes * 3600
+        distribution_status = "Good" if m_dot_per_tube >= 3.6 else "Marginal" if m_dot_per_tube >= 2.0 else "Poor"
+        
+        # Freeze protection check
+        freeze_point = self.calculate_freeze_point(glycol_percent, glycol_type)
+        freeze_risk = "High" if results["T_water_out"] < freeze_point + 2 else "Medium" if results["T_water_out"] < freeze_point + 3 else "Low"
+        
+        # Calculate area ratio (achieved vs required)
+        # For required area, use simplified LMTD method
+        Q_required = results["Q_total_req"] * 1000  # W
+        U_avg = results["U_avg"]
+        LMTD = results["LMTD"] if results["LMTD"] > 0 else 5.0  # Default
+        
+        A_required = Q_required / (U_avg * LMTD) if U_avg > 0 and LMTD > 0 else 0
+        area_ratio = results["A_total"] / A_required if A_required > 0 else 0
+        
+        # Design status
+        design_status = self.determine_design_status(
+            results["epsilon_overall"], results["A_total"], A_required,
+            results["Q_total_achieved"], results["Q_total_req"]
+        )
+        
+        # Store comprehensive results
+        self.results = {
+            # Basic info
+            "heat_exchanger_type": "DX Evaporator",
+            "design_method": "Mass Flow Input",
+            
+            # Thermal performance
+            "heat_duty_required_kw": results["Q_total_req"],
+            "heat_duty_achieved_kw": results["Q_total_achieved"],
+            "kw_difference": results["Q_total_achieved"] - results["Q_total_req"],
+            "kw_match_percentage": (results["Q_total_achieved"] / results["Q_total_req"] * 100) if results["Q_total_req"] > 0 else 0,
+            
+            # Heat duty breakdown
+            "q_latent_req_kw": results["Q_latent_req"],
+            "q_superheat_req_kw": results["Q_superheat_req"],
+            "q_latent_achieved_kw": results["Q_latent_achieved"],
+            "q_superheat_achieved_kw": results["Q_superheat_achieved"],
+            
+            # ε-NTU results
+            "effectiveness": results["epsilon_overall"],
+            "ntu": results["NTU_overall"],
+            "ntu_evap": results["NTU_evap"],
+            "ntu_superheat": results["NTU_superheat"],
+            "epsilon_evap": results["epsilon_evap"],
+            "epsilon_superheat": results["epsilon_superheat"],
+            
+            # Heat transfer coefficients
+            "overall_u": results["U_avg"],
+            "h_tube_evap": results["h_evap"],
+            "h_tube_superheat": results["h_superheat"],
+            "h_shell": results["h_shell"],
+            "u_evap": results["U_evap"],
+            "u_superheat": results["U_superheat"],
+            "lmtd": results["LMTD"],
+            
+            # Temperatures
+            "t_sec_in": results["T_water_in"],
+            "t_sec_out": results["T_water_out"],
+            "t_ref_in": results["T_evap"],
+            "t_ref_out_required": results["T_ref_out_req"],
+            "t_ref_out_achieved": results["T_ref_out"],
+            "superheat_difference": results["T_ref_out"] - results["T_ref_out_req"],
+            "water_deltaT": abs(results["T_water_out"] - results["T_water_in"]),
+            "superheat_req": superheat_req,
+            
+            # Flow rates
+            "refrigerant_mass_flow_kg_s": m_dot_ref,
+            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600,
+            "inlet_quality_percent": inlet_quality,
+            "water_vol_flow_L_hr": m_dot_sec_L * 3600,
+            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600,
+            "flow_per_tube_kg_hr": m_dot_per_tube,
+            
+            # Geometry
+            "shell_diameter_m": shell_diameter,
+            "tube_pitch_mm": tube_pitch * 1000,
+            "pitch_ratio": tube_pitch / tube_od if tube_od > 0 else 0,
+            "tube_od_mm": tube_od * 1000,
+            "tube_id_mm": tube_id * 1000,
+            "area_total_m2": results["A_total"],
+            "area_evap_m2": results["A_evap"],
+            "area_superheat_m2": results["A_superheat"],
+            "area_required_m2": A_required,
+            "area_ratio": area_ratio,
+            "baffle_spacing_m": baffle_spacing,
+            "n_baffles": n_baffles,
+            
+            # Flow parameters
+            "velocity_tube_ms": v_ref,
+            "velocity_shell_ms": v_sec,
+            "velocity_shell_status": sec_velocity_status,
+            "velocity_tube_status": ref_velocity_status,
+            "dp_tube_kpa": dp_tube / 1000,
+            "dp_shell_kpa": dp_shell / 1000,
+            "reynolds_tube": Re_l,
+            "reynolds_shell": Re_shell,
+            "mass_flux_tube": G_ref,
+            "mass_flux_shell": G_sec,
+            
+            # Capacity rates
+            "c_water": results["C_water"],
+            "c_ref_superheat": results["C_ref_superheat"],
+            
+            # DX-specific
+            "distribution_status": distribution_status,
+            "freeze_point_c": freeze_point,
+            "freeze_risk": freeze_risk,
+            "glycol_type": glycol_type,
+            "glycol_percentage": glycol_percent,
+            
+            # Design status
+            "design_status": design_status,
+        }
+        
+        return self.results
+    
+    def design_condenser(self, inputs: Dict) -> Dict:
+        """Design condenser using ε-NTU method with three regions"""
+        
+        # Extract inputs
+        refrigerant = inputs["refrigerant"]
+        m_dot_ref = inputs["m_dot_ref"]  # kg/s
+        T_ref_in_superheated = inputs["T_ref_in_superheated"]
+        T_cond = inputs["T_ref"]
+        subcool_req = inputs["delta_T_sh_sc"]
+        
+        # Water/glycol side
+        glycol_percent = inputs["glycol_percentage"]
+        glycol_type = inputs.get("glycol_type", "ethylene")
+        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/s
+        T_sec_in = inputs["T_sec_in"]
+        
+        # Geometry
+        tube_size = inputs["tube_size"]
+        tube_material = inputs["tube_material"]
+        tube_thickness = inputs["tube_thickness"] / 1000  # m
+        tube_pitch = inputs["tube_pitch"] / 1000  # m
+        n_passes = inputs["n_passes"]
+        n_baffles = inputs["n_baffles"]
+        n_tubes = inputs["n_tubes"]
+        tube_length = inputs["tube_length"]
+        tube_layout = inputs["tube_layout"].lower()
+        
+        # Get fluid properties
+        ref_props = self.REFRIGERANTS[refrigerant]
+        sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
+        
+        # Convert secondary flow to kg/s
+        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
+        
+        # Tube dimensions
+        tube_od = self.TUBE_SIZES[tube_size]
+        tube_id = max(tube_od - 2 * tube_thickness, tube_od * 0.8)
+        
+        # Calculate shell diameter and shell-side HTC
+        shell_diameter = self.calculate_shell_diameter(tube_od, n_tubes, tube_pitch, tube_layout)
+        
+        # Calculate equivalent diameter for shell side
+        if tube_layout == "triangular":
+            D_e = 4 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2) / (math.pi * tube_od)
+        else:
+            D_e = 4 * (tube_pitch**2 - 0.25 * math.pi * tube_od**2) / (math.pi * tube_od)
+        
+        # Calculate shell-side flow area and velocity
+        shell_cross_area = math.pi * shell_diameter**2 / 4
+        tube_bundle_area = n_tubes * math.pi * tube_od**2 / 4
+        shell_flow_area = (shell_cross_area - tube_bundle_area) * 0.4
+        
+        # Shell-side mass flux and Reynolds
+        G_sec = m_dot_sec_kg / shell_flow_area if shell_flow_area > 0 else 0
+        Re_shell = G_sec * D_e / sec_props["mu"]
+        
+        # Shell-side HTC
+        h_shell = self.calculate_shell_side_htc(Re_shell, sec_props["pr"], D_e, sec_props["k"], tube_layout)
+        
+        # Tube material thermal conductivity
+        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
+        
+        # Calculate condenser performance using ε-NTU method
+        results = self.calculate_condenser_three_region(
+            m_dot_ref, m_dot_sec_kg, T_ref_in_superheated, T_cond, subcool_req,
+            T_sec_in, ref_props, sec_props, tube_id, h_shell, tube_k,
+            n_tubes, tube_length, n_passes
+        )
+        
+        # Calculate additional parameters
+        baffle_spacing = tube_length / (n_baffles + 1)
+        
+        # Flow velocities
+        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / max(n_passes, 1)
+        G_ref = results["G_ref"]
+        
+        # For two-phase flow in condensation region, use average density
+        # Quality ~0.5 in condensation region
+        rho_tp = 1 / (0.5/ref_props["rho_vapor"] + 0.5/ref_props["rho_liquid"])
+        v_ref = G_ref / rho_tp
+        v_sec = G_sec / sec_props["rho"]
+        
+        # Pressure drops (simplified)
+        # Tube side - simplified for condensation
+        Re_l = G_ref * tube_id / ref_props["mu_liquid"] if ref_props["mu_liquid"] > 0 else 0
+        if Re_l > 2300:
+            f_tube = (0.79 * math.log(Re_l) - 1.64)**-2
+        else:
+            f_tube = 64 / Re_l if Re_l > 0 else 0.05
+        
+        # Two-phase multiplier for condensation (simplified)
+        phi_tp = 1 + 1.5 / 0.5 if 0.5 > 0 else 1  # For average quality 0.5
+        dp_tube = f_tube * (tube_length * n_passes / tube_id) * (rho_tp * v_ref**2 / 2) * phi_tp
+        
+        # Shell side pressure drop
+        if Re_shell < 2300:
+            f_shell = 64 / Re_shell if Re_shell > 0 else 0.2
+        else:
+            f_shell = 0.2 * Re_shell**-0.2
+        
+        dp_shell = f_shell * (tube_length / D_e) * n_baffles * (sec_props["rho"] * v_sec**2 / 2)
+        
+        # Check velocities
+        sec_velocity_status = self.check_velocity_status(v_sec, glycol_percent, "shell")
+        ref_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant_two_phase")
+        
+        # Calculate area ratio (achieved vs required)
+        Q_required = results["Q_total_req"] * 1000  # W
+        U_avg = results["U_avg"]
+        LMTD = results["LMTD"] if results["LMTD"] > 0 else 5.0  # Default
+        
+        A_required = Q_required / (U_avg * LMTD) if U_avg > 0 and LMTD > 0 else 0
+        area_ratio = results["A_total"] / A_required if A_required > 0 else 0
+        
+        # Design status
+        design_status = self.determine_design_status(
+            results["epsilon_overall"], results["A_total"], A_required,
+            results["Q_total_achieved"], results["Q_total_req"]
+        )
+        
+        # Store comprehensive results
+        self.results = {
+            # Basic info
+            "heat_exchanger_type": "Condenser",
+            "design_method": "Mass Flow Input",
+            
+            # Thermal performance
+            "heat_duty_required_kw": results["Q_total_req"],
+            "heat_duty_achieved_kw": results["Q_total_achieved"],
+            "kw_difference": results["Q_total_achieved"] - results["Q_total_req"],
+            "kw_match_percentage": (results["Q_total_achieved"] / results["Q_total_req"] * 100) if results["Q_total_req"] > 0 else 0,
+            
+            # Heat duty breakdown
+            "q_desuperheat_req_kw": results["Q_desuperheat_req"],
+            "q_latent_req_kw": results["Q_latent_req"],
+            "q_subcool_req_kw": results["Q_subcool_req"],
+            "q_desuperheat_achieved_kw": results["Q_desuperheat_achieved"],
+            "q_latent_achieved_kw": results["Q_latent_achieved"],
+            "q_subcool_achieved_kw": results["Q_subcool_achieved"],
+            
+            # ε-NTU results
+            "effectiveness": results["epsilon_overall"],
+            "ntu": results["NTU_overall"],
+            "ntu_desuperheat": results["NTU1"],
+            "ntu_condense": results["NTU2"],
+            "ntu_subcool": results["NTU3"],
+            "epsilon_desuperheat": results["epsilon1"],
+            "epsilon_condense": results["epsilon2"],
+            "epsilon_subcool": results["epsilon3"],
+            
+            # Heat transfer coefficients
+            "overall_u": results["U_avg"],
+            "h_tube_desuperheat": results["h_desuperheat"],
+            "h_tube_condense": results["h_condense"],
+            "h_tube_subcool": results["h_subcool"],
+            "h_shell": results["h_shell"],
+            "u_desuperheat": results["U_desuperheat"],
+            "u_condense": results["U_condense"],
+            "u_subcool": results["U_subcool"],
+            "lmtd": results["LMTD"],
+            
+            # Temperatures
+            "t_sec_in": results["T_water_in"],
+            "t_sec_out": results["T_water_out"],
+            "t_ref_in_superheated": results["T_ref_in"],
+            "t_ref_condensing": results["T_cond"],
+            "t_ref_out_required": results["T_ref_out_req"],
+            "t_ref_out_achieved": results["T_ref_out"],
+            "subcool_difference": results["T_ref_out"] - results["T_ref_out_req"],
+            "water_deltaT": abs(results["T_water_out"] - results["T_water_in"]),
+            "subcool_req": subcool_req,
+            
+            # Flow rates
+            "refrigerant_mass_flow_kg_s": m_dot_ref,
+            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600,
+            "water_vol_flow_L_hr": m_dot_sec_L * 3600,
+            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600,
+            
+            # Geometry
+            "shell_diameter_m": shell_diameter,
+            "tube_pitch_mm": tube_pitch * 1000,
+            "pitch_ratio": tube_pitch / tube_od if tube_od > 0 else 0,
+            "tube_od_mm": tube_od * 1000,
+            "tube_id_mm": tube_id * 1000,
+            "area_total_m2": results["A_total"],
+            "area_desuperheat_m2": results["A_desuperheat"],
+            "area_condense_m2": results["A_condense"],
+            "area_subcool_m2": results["A_subcool"],
+            "area_required_m2": A_required,
+            "area_ratio": area_ratio,
+            "baffle_spacing_m": baffle_spacing,
+            "n_baffles": n_baffles,
+            
+            # Flow parameters
+            "velocity_tube_ms": v_ref,
+            "velocity_shell_ms": v_sec,
+            "velocity_shell_status": sec_velocity_status,
+            "velocity_tube_status": ref_velocity_status,
+            "dp_tube_kpa": dp_tube / 1000,
+            "dp_shell_kpa": dp_shell / 1000,
+            "reynolds_tube": Re_l,
+            "reynolds_shell": Re_shell,
+            "mass_flux_tube": G_ref,
+            "mass_flux_shell": G_sec,
+            
+            # Capacity rates
+            "c_water": results["C_water"],
+            "c_ref_desuperheat": results["C_ref_desuperheat"],
+            "c_ref_subcool": results["C_ref_subcool"],
+            
+            # Glycol info
+            "glycol_type": glycol_type,
+            "glycol_percentage": glycol_percent,
+            
+            # Design status
+            "design_status": design_status,
+        }
+        
+        return self.results
+    
+    # ==================== HELPER FUNCTIONS ====================
     
     def calculate_shell_diameter(self, tube_od: float, n_tubes: int, pitch: float,
                                tube_layout: str = "triangular") -> float:
@@ -610,526 +1445,6 @@ class DXHeatExchangerDesign:
                 Nu = 0.31 * Re**0.6 * Pr**0.33
         
         return Nu * k / D_e
-    
-    def design_dx_evaporator(self, inputs: Dict) -> Dict:
-        """Design DX evaporator - refrigerant in tubes, water/glycol in shell"""
-        
-        # Extract inputs
-        refrigerant = inputs["refrigerant"]
-        m_dot_ref = inputs["m_dot_ref"]  # kg/s (direct input)
-        T_evap = inputs["T_ref"]
-        superheat_req = inputs["delta_T_sh_sc"]
-        inlet_quality = inputs.get("inlet_quality", 20)  # percentage
-        
-        # Calculate required kW from mass flow and conditions
-        kw_required_data = self.calculate_evaporator_kw_required(
-            m_dot_ref, T_evap, inlet_quality, superheat_req, refrigerant
-        )
-        
-        Q_required = kw_required_data["kw_required"]
-        Q_latent_req = kw_required_data["kw_latent"]
-        Q_superheat_req = kw_required_data["kw_superheat"]
-        T_superheated_req = kw_required_data["T_superheated_req"]
-        
-        ref_props = self.REFRIGERANTS[refrigerant]
-        
-        # Water/glycol side
-        glycol_percent = inputs["glycol_percentage"]
-        glycol_type = inputs.get("glycol_type", "ethylene")
-        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/s
-        T_sec_in = inputs["T_sec_in"]
-        
-        # Geometry
-        tube_size = inputs["tube_size"]
-        tube_material = inputs["tube_material"]
-        tube_thickness = inputs["tube_thickness"] / 1000  # m
-        tube_pitch = inputs["tube_pitch"] / 1000  # m
-        n_passes = inputs["n_passes"]
-        n_baffles = inputs["n_baffles"]
-        n_tubes = inputs["n_tubes"]
-        tube_length = inputs["tube_length"]
-        tube_layout = inputs["tube_layout"].lower()
-        
-        # Get water/glycol properties
-        sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
-        
-        # Convert secondary flow to kg/s
-        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
-        
-        # Tube dimensions
-        tube_od = self.TUBE_SIZES[tube_size]
-        tube_id = max(tube_od - 2 * tube_thickness, tube_od * 0.8)
-        
-        # Calculate shell diameter
-        shell_diameter = self.calculate_shell_diameter(
-            tube_od, n_tubes, tube_pitch, tube_layout
-        )
-        
-        # Baffle spacing
-        baffle_spacing = tube_length / (n_baffles + 1)
-        
-        # Calculate equivalent diameter for shell side
-        if tube_layout == "triangular":
-            D_e = 4 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2) / (math.pi * tube_od)
-        else:
-            D_e = 4 * (tube_pitch**2 - 0.25 * math.pi * tube_od**2) / (math.pi * tube_od)
-        
-        # Flow areas
-        tube_flow_area = (math.pi * tube_id**2 / 4) * n_tubes / n_passes
-        shell_cross_area = math.pi * shell_diameter**2 / 4
-        tube_bundle_area = n_tubes * math.pi * tube_od**2 / 4
-        shell_flow_area = (shell_cross_area - tube_bundle_area) * 0.4
-        
-        # Mass fluxes
-        G_ref = m_dot_ref / tube_flow_area if tube_flow_area > 0 else 0
-        G_sec = m_dot_sec_kg / shell_flow_area if shell_flow_area > 0 else 0
-        
-        # Heat transfer coefficients - TUBE SIDE (Refrigerant evaporation)
-        quality_in = inlet_quality / 100.0
-        quality_avg = (quality_in + 1.0) / 2.0  # Average quality
-        
-        Re_l = G_ref * tube_id / ref_props["mu_liquid"]
-        Pr_l = ref_props["pr_liquid"]
-        
-        h_ref = self.shah_evaporation(
-            Re_l, Pr_l, quality_avg,
-            ref_props["rho_liquid"], ref_props["rho_vapor"],
-            tube_id, G_ref, ref_props["h_fg"] * 1000,
-            ref_props["k_liquid"]
-        )
-        
-        # Heat transfer coefficients - SHELL SIDE (Water/Glycol)
-        Re_shell = G_sec * D_e / sec_props["mu"]
-        h_shell = self.calculate_shell_side_htc(
-            Re_shell, sec_props["pr"], D_e, sec_props["k"], tube_layout
-        )
-        
-        # Overall U
-        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
-        R_i = 1 / h_ref
-        R_o = 1 / h_shell
-        R_w = tube_od * math.log(tube_od / tube_id) / (2 * tube_k)
-        R_f = 0.00035
-        
-        U = 1 / (R_i + R_o + R_w + R_f)
-        
-        # Total heat transfer area
-        A_total = math.pi * tube_od * tube_length * n_tubes
-        
-        # Calculate water outlet temperature
-        if m_dot_sec_kg > 0:
-            T_sec_out = T_sec_in - (Q_required * 1000) / (m_dot_sec_kg * sec_props["cp"])
-        else:
-            T_sec_out = T_sec_in
-        
-        # Calculate LMTD for evaporator
-        dt1 = T_sec_in - T_evap
-        dt2 = T_sec_out - T_superheated_req
-        
-        if inputs["flow_arrangement"] != "counter":
-            dt1 = abs(T_sec_in - T_evap)
-            dt2 = abs(T_sec_out - T_superheated_req)
-        
-        if dt1 <= 0 or dt2 <= 0 or abs(dt1 - dt2) < 1e-6:
-            LMTD = min(dt1, dt2) if min(dt1, dt2) > 0 else 0
-        else:
-            LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
-        
-        # Calculate achieved heat transfer
-        Q_achieved = U * A_total * LMTD / 1000 if U > 0 and LMTD > 0 else 0  # kW
-        
-        # Calculate achieved superheat temperature
-        if Q_achieved > 0:
-            # Calculate portion used for evaporation (based on inlet quality)
-            Q_latent_achieved = Q_achieved * (Q_latent_req / Q_required) if Q_required > 0 else 0
-            Q_superheat_achieved = Q_achieved - Q_latent_achieved
-            
-            # Calculate achieved superheat
-            T_superheated_achieved = T_evap + (Q_superheat_achieved * 1000) / (m_dot_ref * ref_props["cp_vapor"] * 1000)
-        else:
-            Q_latent_achieved = 0
-            Q_superheat_achieved = 0
-            T_superheated_achieved = T_evap
-        
-        # Calculate required area
-        A_required = (Q_required * 1000) / (U * LMTD) if U > 0 and LMTD > 0 else 0
-        
-        # Calculate effectiveness
-        C_sec = m_dot_sec_kg * sec_props["cp"]
-        NTU = U * A_total / C_sec if C_sec > 0 else 0
-        effectiveness = 1 - math.exp(-NTU)
-        
-        # Pressure drops
-        Re_v = G_ref * tube_id / ref_props["mu_vapor"]
-        dp_tube = self.friedel_two_phase_pressure_drop(
-            Re_l, Re_v, quality_avg,
-            ref_props["rho_liquid"], ref_props["rho_vapor"],
-            ref_props["mu_liquid"], ref_props["mu_vapor"],
-            tube_id, G_ref, tube_length * n_passes
-        )
-        
-        # Shell side pressure drop
-        if Re_shell < 2300:
-            f_shell = 64 / Re_shell if Re_shell > 0 else 0.2
-        else:
-            f_shell = 0.2 * Re_shell**-0.2
-        
-        dp_shell = f_shell * (tube_length / D_e) * n_baffles * (sec_props["rho"] * (G_sec/sec_props["rho"])**2 / 2)
-        
-        # Calculate velocities
-        rho_tp = 1 / (quality_avg/ref_props["rho_vapor"] + (1-quality_avg)/ref_props["rho_liquid"])
-        v_ref = G_ref / rho_tp
-        v_sec = G_sec / sec_props["rho"]
-        
-        # Check velocities
-        sec_velocity_status = self.check_velocity_status(v_sec, glycol_percent, "shell")
-        ref_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant_two_phase")
-        
-        # Refrigerant distribution check
-        m_dot_per_tube = m_dot_ref / n_tubes * 3600
-        distribution_status = "Good" if m_dot_per_tube >= 3.6 else "Marginal" if m_dot_per_tube >= 2.0 else "Poor"
-        
-        # Freeze protection check
-        freeze_point = self.calculate_freeze_point(glycol_percent, glycol_type)
-        freeze_risk = "High" if T_sec_out < freeze_point + 2 else "Medium" if T_sec_out < freeze_point + 3 else "Low"
-        
-        # Store results
-        self.results = {
-            # Basic info
-            "heat_exchanger_type": "DX Evaporator",
-            "refrigerant_side": "Tube side",
-            "water_side": "Shell side",
-            "design_method": "Mass Flow Input",
-            
-            # Thermal performance
-            "heat_duty_required_kw": Q_required,
-            "heat_duty_achieved_kw": Q_achieved,
-            "kw_difference": Q_achieved - Q_required,
-            "kw_match_percentage": (Q_achieved / Q_required * 100) if Q_required > 0 else 0,
-            "q_latent_req_kw": Q_latent_req,
-            "q_superheat_req_kw": Q_superheat_req,
-            "q_latent_achieved_kw": Q_latent_achieved,
-            "q_superheat_achieved_kw": Q_superheat_achieved,
-            "effectiveness": effectiveness,
-            "ntu": NTU,
-            "overall_u": U,
-            "h_tube": h_ref,
-            "h_shell": h_shell,
-            "lmtd": LMTD,
-            
-            # Temperatures
-            "t_sec_in": T_sec_in,
-            "t_sec_out": T_sec_out,
-            "t_ref_in": T_evap,
-            "t_ref_out_required": T_superheated_req,
-            "t_ref_out_achieved": T_superheated_achieved,
-            "superheat_difference": T_superheated_achieved - T_superheated_req,
-            "water_deltaT": abs(T_sec_out - T_sec_in),
-            "superheat_req": superheat_req,
-            
-            # Flow rates
-            "refrigerant_mass_flow_kg_s": m_dot_ref,
-            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600,
-            "inlet_quality_percent": inlet_quality,
-            "water_vol_flow_L_hr": m_dot_sec_L * 3600,
-            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600,
-            "flow_per_tube_kg_hr": m_dot_per_tube,
-            
-            # Geometry
-            "shell_diameter_m": shell_diameter,
-            "tube_pitch_mm": tube_pitch * 1000,
-            "pitch_ratio": tube_pitch / tube_od if tube_od > 0 else 0,
-            "tube_od_mm": tube_od * 1000,
-            "tube_id_mm": tube_id * 1000,
-            "area_total_m2": A_total,
-            "area_required_m2": A_required,
-            "area_ratio": A_total / A_required if A_required > 0 else 0,
-            "baffle_spacing_m": baffle_spacing,
-            
-            # Flow parameters
-            "velocity_tube_ms": v_ref,
-            "velocity_shell_ms": v_sec,
-            "velocity_shell_status": sec_velocity_status,
-            "velocity_tube_status": ref_velocity_status,
-            "dp_tube_kpa": dp_tube / 1000,
-            "dp_shell_kpa": dp_shell / 1000,
-            "reynolds_tube": Re_l,
-            "reynolds_shell": Re_shell,
-            "mass_flux_tube": G_ref,
-            "mass_flux_shell": G_sec,
-            
-            # DX-specific
-            "distribution_status": distribution_status,
-            "freeze_point_c": freeze_point,
-            "freeze_risk": freeze_risk,
-            "glycol_type": glycol_type,
-            "glycol_percentage": glycol_percent,
-            
-            # Design status
-            "design_status": self.determine_design_status(effectiveness, A_total, A_required, Q_achieved, Q_required),
-        }
-        
-        return self.results
-    
-    def design_condenser(self, inputs: Dict) -> Dict:
-        """Design condenser - refrigerant in tubes, water/glycol in shell"""
-        
-        # Extract inputs
-        refrigerant = inputs["refrigerant"]
-        m_dot_ref = inputs["m_dot_ref"]  # kg/s (direct input)
-        T_ref_in_superheated = inputs["T_ref_in_superheated"]
-        T_cond = inputs["T_ref"]
-        subcool_req = inputs["delta_T_sh_sc"]
-        
-        # Calculate required kW from mass flow and conditions
-        kw_required_data = self.calculate_condenser_kw_required(
-            m_dot_ref, T_ref_in_superheated, T_cond, subcool_req, refrigerant
-        )
-        
-        Q_required = kw_required_data["kw_required"]
-        Q_desuperheat_req = kw_required_data["kw_desuperheat"]
-        Q_latent_req = kw_required_data["kw_latent"]
-        Q_subcool_req = kw_required_data["kw_subcool"]
-        T_subcooled_req = kw_required_data["T_subcooled_req"]
-        
-        ref_props = self.REFRIGERANTS[refrigerant]
-        
-        # Water/glycol side
-        glycol_percent = inputs["glycol_percentage"]
-        glycol_type = inputs.get("glycol_type", "ethylene")
-        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/s
-        T_sec_in = inputs["T_sec_in"]
-        
-        # Geometry
-        tube_size = inputs["tube_size"]
-        tube_material = inputs["tube_material"]
-        tube_thickness = inputs["tube_thickness"] / 1000  # m
-        tube_pitch = inputs["tube_pitch"] / 1000  # m
-        n_passes = inputs["n_passes"]
-        n_baffles = inputs["n_baffles"]
-        n_tubes = inputs["n_tubes"]
-        tube_length = inputs["tube_length"]
-        tube_layout = inputs["tube_layout"].lower()
-        
-        # Get water/glycol properties
-        sec_props = self.calculate_water_glycol_properties(T_sec_in, glycol_percent, glycol_type)
-        
-        # Convert secondary flow to kg/s
-        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000
-        
-        # Tube dimensions
-        tube_od = self.TUBE_SIZES[tube_size]
-        tube_id = max(tube_od - 2 * tube_thickness, tube_od * 0.8)
-        
-        # Calculate shell diameter
-        shell_diameter = self.calculate_shell_diameter(
-            tube_od, n_tubes, tube_pitch, tube_layout
-        )
-        
-        # Baffle spacing
-        baffle_spacing = tube_length / (n_baffles + 1)
-        
-        # Calculate equivalent diameter for shell side
-        if tube_layout == "triangular":
-            D_e = 4 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2) / (math.pi * tube_od)
-        else:
-            D_e = 4 * (tube_pitch**2 - 0.25 * math.pi * tube_od**2) / (math.pi * tube_od)
-        
-        # Flow areas
-        tube_flow_area = (math.pi * tube_id**2 / 4) * n_tubes / n_passes
-        shell_cross_area = math.pi * shell_diameter**2 / 4
-        tube_bundle_area = n_tubes * math.pi * tube_od**2 / 4
-        shell_flow_area = (shell_cross_area - tube_bundle_area) * 0.4
-        
-        # Mass fluxes
-        G_ref = m_dot_ref / tube_flow_area if tube_flow_area > 0 else 0
-        G_sec = m_dot_sec_kg / shell_flow_area if shell_flow_area > 0 else 0
-        
-        # Heat transfer coefficients - TUBE SIDE (Refrigerant condensation)
-        # For condenser, quality changes from 1.0 to ~0.0
-        # Starting from superheated, then two-phase, then subcooled
-        # Use average quality for two-phase region
-        quality_avg = 0.5  # Average in condensation region
-        
-        Re_l = G_ref * tube_id / ref_props["mu_liquid"]
-        Re_v = G_ref * tube_id / ref_props["mu_vapor"]
-        Pr_l = ref_props["pr_liquid"]
-        
-        h_ref = self.cavallini_condensation(
-            Re_l, Re_v, Pr_l, quality_avg,
-            ref_props["rho_liquid"], ref_props["rho_vapor"],
-            ref_props["mu_liquid"], ref_props["mu_vapor"],
-            tube_id, ref_props["k_liquid"]
-        )
-        
-        # Heat transfer coefficients - SHELL SIDE (Water/Glycol)
-        Re_shell = G_sec * D_e / sec_props["mu"]
-        h_shell = self.calculate_shell_side_htc(
-            Re_shell, sec_props["pr"], D_e, sec_props["k"], tube_layout
-        )
-        
-        # Overall U
-        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
-        R_i = 1 / h_ref
-        R_o = 1 / h_shell
-        R_w = tube_od * math.log(tube_od / tube_id) / (2 * tube_k)
-        R_f = 0.00035
-        
-        U = 1 / (R_i + R_o + R_w + R_f)
-        
-        # Total heat transfer area
-        A_total = math.pi * tube_od * tube_length * n_tubes
-        
-        # Calculate water outlet temperature
-        if m_dot_sec_kg > 0:
-            T_sec_out = T_sec_in + (Q_required * 1000) / (m_dot_sec_kg * sec_props["cp"])
-        else:
-            T_sec_out = T_sec_in
-        
-        # Calculate LMTD for condenser
-        # For condenser with superheat, we need to use effective LMTD
-        # Simplified approach: use saturation temperature for LMTD
-        dt1 = T_cond - T_sec_in
-        dt2 = T_subcooled_req - T_sec_out
-        
-        if inputs["flow_arrangement"] != "counter":
-            dt1 = abs(T_cond - T_sec_in)
-            dt2 = abs(T_subcooled_req - T_sec_out)
-        
-        if dt1 <= 0 or dt2 <= 0 or abs(dt1 - dt2) < 1e-6:
-            LMTD = min(dt1, dt2) if min(dt1, dt2) > 0 else 0
-        else:
-            LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
-        
-        # Calculate achieved heat transfer
-        Q_achieved = U * A_total * LMTD / 1000 if U > 0 and LMTD > 0 else 0  # kW
-        
-        # Calculate achieved subcool temperature
-        if Q_achieved > 0:
-            # Distribute achieved heat among three regions proportionally
-            Q_desuperheat_achieved = Q_achieved * (Q_desuperheat_req / Q_required) if Q_required > 0 else 0
-            Q_latent_achieved = Q_achieved * (Q_latent_req / Q_required) if Q_required > 0 else 0
-            Q_subcool_achieved = Q_achieved - Q_desuperheat_achieved - Q_latent_achieved
-            
-            # Calculate achieved subcool
-            if Q_subcool_achieved > 0:
-                T_subcooled_achieved = T_cond - (Q_subcool_achieved * 1000) / (m_dot_ref * ref_props["cp_liquid"] * 1000)
-            else:
-                T_subcooled_achieved = T_cond
-        else:
-            Q_desuperheat_achieved = 0
-            Q_latent_achieved = 0
-            Q_subcool_achieved = 0
-            T_subcooled_achieved = T_cond
-        
-        # Calculate required area
-        A_required = (Q_required * 1000) / (U * LMTD) if U > 0 and LMTD > 0 else 0
-        
-        # Calculate effectiveness
-        C_sec = m_dot_sec_kg * sec_props["cp"]
-        NTU = U * A_total / C_sec if C_sec > 0 else 0
-        effectiveness = 1 - math.exp(-NTU)
-        
-        # Pressure drops
-        dp_tube = self.friedel_two_phase_pressure_drop(
-            Re_l, Re_v, quality_avg,
-            ref_props["rho_liquid"], ref_props["rho_vapor"],
-            ref_props["mu_liquid"], ref_props["mu_vapor"],
-            tube_id, G_ref, tube_length * n_passes
-        )
-        
-        # Shell side pressure drop
-        if Re_shell < 2300:
-            f_shell = 64 / Re_shell if Re_shell > 0 else 0.2
-        else:
-            f_shell = 0.2 * Re_shell**-0.2
-        
-        dp_shell = f_shell * (tube_length / D_e) * n_baffles * (sec_props["rho"] * (G_sec/sec_props["rho"])**2 / 2)
-        
-        # Calculate velocities
-        rho_tp = 1 / (quality_avg/ref_props["rho_vapor"] + (1-quality_avg)/ref_props["rho_liquid"])
-        v_ref = G_ref / rho_tp
-        v_sec = G_sec / sec_props["rho"]
-        
-        # Check velocities
-        sec_velocity_status = self.check_velocity_status(v_sec, glycol_percent, "shell")
-        ref_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant_two_phase")
-        
-        # Store results
-        self.results = {
-            # Basic info
-            "heat_exchanger_type": "Condenser",
-            "refrigerant_side": "Tube side",
-            "water_side": "Shell side",
-            "design_method": "Mass Flow Input",
-            
-            # Thermal performance
-            "heat_duty_required_kw": Q_required,
-            "heat_duty_achieved_kw": Q_achieved,
-            "kw_difference": Q_achieved - Q_required,
-            "kw_match_percentage": (Q_achieved / Q_required * 100) if Q_required > 0 else 0,
-            "q_desuperheat_req_kw": Q_desuperheat_req,
-            "q_latent_req_kw": Q_latent_req,
-            "q_subcool_req_kw": Q_subcool_req,
-            "q_desuperheat_achieved_kw": Q_desuperheat_achieved,
-            "q_latent_achieved_kw": Q_latent_achieved,
-            "q_subcool_achieved_kw": Q_subcool_achieved,
-            "effectiveness": effectiveness,
-            "ntu": NTU,
-            "overall_u": U,
-            "h_tube": h_ref,
-            "h_shell": h_shell,
-            "lmtd": LMTD,
-            
-            # Temperatures
-            "t_sec_in": T_sec_in,
-            "t_sec_out": T_sec_out,
-            "t_ref_in_superheated": T_ref_in_superheated,
-            "t_ref_condensing": T_cond,
-            "t_ref_out_required": T_subcooled_req,
-            "t_ref_out_achieved": T_subcooled_achieved,
-            "subcool_difference": T_subcooled_achieved - T_subcooled_req,
-            "water_deltaT": abs(T_sec_out - T_sec_in),
-            "subcool_req": subcool_req,
-            
-            # Flow rates
-            "refrigerant_mass_flow_kg_s": m_dot_ref,
-            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600,
-            "water_vol_flow_L_hr": m_dot_sec_L * 3600,
-            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600,
-            
-            # Geometry
-            "shell_diameter_m": shell_diameter,
-            "tube_pitch_mm": tube_pitch * 1000,
-            "pitch_ratio": tube_pitch / tube_od if tube_od > 0 else 0,
-            "tube_od_mm": tube_od * 1000,
-            "tube_id_mm": tube_id * 1000,
-            "area_total_m2": A_total,
-            "area_required_m2": A_required,
-            "area_ratio": A_total / A_required if A_required > 0 else 0,
-            "baffle_spacing_m": baffle_spacing,
-            
-            # Flow parameters
-            "velocity_tube_ms": v_ref,
-            "velocity_shell_ms": v_sec,
-            "velocity_shell_status": sec_velocity_status,
-            "velocity_tube_status": ref_velocity_status,
-            "dp_tube_kpa": dp_tube / 1000,
-            "dp_shell_kpa": dp_shell / 1000,
-            "reynolds_tube": Re_l,
-            "reynolds_shell": Re_shell,
-            "mass_flux_tube": G_ref,
-            "mass_flux_shell": G_sec,
-            
-            # Glycol info
-            "glycol_type": glycol_type,
-            "glycol_percentage": glycol_percent,
-            
-            # Design status
-            "design_status": self.determine_design_status(effectiveness, A_total, A_required, Q_achieved, Q_required),
-        }
-        
-        return self.results
     
     def check_velocity_status(self, velocity: float, glycol_percent: int, flow_type: str) -> Dict:
         """Check velocity against recommended ranges"""
@@ -1175,17 +1490,19 @@ class DXHeatExchangerDesign:
         area_ratio = area_total / area_required if area_required > 0 else 0
         kw_ratio = kw_achieved / kw_required if kw_required > 0 else 0
         
-        # Check if kW requirement is met
-        kw_match = abs(kw_ratio - 1.0) < 0.1  # Within 10%
+        # Check key performance indicators
+        kw_match = abs(kw_ratio - 1.0) < 0.15  # Within 15%
+        area_adequate = area_ratio >= 0.9
+        effective_enough = effectiveness >= 0.6
         
-        if effectiveness >= 0.7 and area_ratio >= 0.95 and kw_match:
+        if kw_match and area_adequate and effective_enough:
             return "Adequate"
-        elif effectiveness >= 0.6 and area_ratio >= 0.9 and kw_ratio >= 0.9:
+        elif kw_ratio >= 0.8 and area_ratio >= 0.8 and effectiveness >= 0.5:
             return "Marginal"
         else:
             return "Inadequate"
 
-# Helper function for number input with +/- buttons (same as before)
+# Helper function for number input with +/- buttons
 def number_input_with_buttons(label: str, min_value: float, max_value: float, 
                             value: float, step: float, key: str, format: str = "%.1f",
                             help_text: str = None) -> float:
@@ -1242,9 +1559,9 @@ def create_input_section():
     
     st.sidebar.markdown("---")
     
-    # Design method selection - Now only Mass Flow input
+    # Design method - Only Mass Flow Input
     st.sidebar.subheader("📊 Design Input Method")
-    st.sidebar.info("**Mass Flow Input Only**\nEnter refrigerant mass flow from compressor specs")
+    st.sidebar.info("**Mass Flow Input**\nEnter refrigerant mass flow from compressor specs")
     
     # Initialize designer for refrigerant list
     designer = DXHeatExchangerDesign()
@@ -1344,7 +1661,7 @@ def create_input_section():
     
     st.sidebar.markdown("---")
     
-    # Water/Glycol parameters (same as before)
+    # Water/Glycol parameters
     st.sidebar.subheader("💧 Water/Glycol Side")
     
     glycol_options = ["Water Only", "Water + Ethylene Glycol", "Water + Propylene Glycol (Food Grade)"]
@@ -1416,15 +1733,19 @@ def create_input_section():
         format="%.0f"
     )
     
-    # Flow arrangement
-    inputs["flow_arrangement"] = st.sidebar.radio(
+    # Flow arrangement (now informational only, calculations use counterflow)
+    st.sidebar.radio(
         "Flow Arrangement",
-        ["Counter", "Parallel"]
-    ).lower()
+        ["Counter", "Parallel"],
+        index=0,
+        disabled=True,
+        help="ε-NTU method assumes counterflow (most efficient)"
+    )
+    inputs["flow_arrangement"] = "counter"
     
     st.sidebar.markdown("---")
     
-    # Geometry parameters (same as before)
+    # Geometry parameters
     st.sidebar.subheader("📐 Geometry Parameters")
     
     inputs["tube_size"] = st.sidebar.selectbox(
@@ -1538,7 +1859,7 @@ def display_kw_comparison(kw_required: float, kw_achieved: float):
     diff = kw_achieved - kw_required
     percent_diff = (diff / kw_required * 100) if kw_required > 0 else 0
     
-    if abs(percent_diff) <= 5:
+    if abs(percent_diff) <= 10:  # Within 10%
         css_class = "kw-comparison kw-match"
         status_icon = "✅"
     else:
@@ -1580,6 +1901,74 @@ def display_temp_comparison(temp_required: float, temp_achieved: float, label: s
     """
     return html
 
+def display_region_performance(results: Dict, hex_type: str):
+    """Display region-by-region performance"""
+    
+    if hex_type == "Condenser":
+        st.markdown("### 📊 Three-Region Condenser Performance")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown('<div class="region-box region-desuperheat">', unsafe_allow_html=True)
+            st.markdown("**🔴 Desuperheating Region**")
+            st.write(f"Area: {results['area_desuperheat_m2']:.1f} m²")
+            st.write(f"HTC: {results['h_tube_desuperheat']:.0f} W/m²K")
+            st.write(f"U: {results['u_desuperheat']:.0f} W/m²K")
+            st.write(f"NTU: {results['ntu_desuperheat']:.2f}")
+            st.write(f"ε: {results['epsilon_desuperheat']:.3f}")
+            st.write(f"Heat: {results['q_desuperheat_achieved_kw']:.1f} kW")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="region-box region-condense">', unsafe_allow_html=True)
+            st.markdown("**🔵 Condensing Region**")
+            st.write(f"Area: {results['area_condense_m2']:.1f} m²")
+            st.write(f"HTC: {results['h_tube_condense']:.0f} W/m²K")
+            st.write(f"U: {results['u_condense']:.0f} W/m²K")
+            st.write(f"NTU: {results['ntu_condense']:.2f}")
+            st.write(f"ε: {results['epsilon_condense']:.3f}")
+            st.write(f"Heat: {results['q_latent_achieved_kw']:.1f} kW")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown('<div class="region-box region-subcool">', unsafe_allow_html=True)
+            st.markdown("**🟢 Subcooling Region**")
+            st.write(f"Area: {results['area_subcool_m2']:.1f} m²")
+            st.write(f"HTC: {results['h_tube_subcool']:.0f} W/m²K")
+            st.write(f"U: {results['u_subcool']:.0f} W/m²K")
+            st.write(f"NTU: {results['ntu_subcool']:.2f}")
+            st.write(f"ε: {results['epsilon_subcool']:.3f}")
+            st.write(f"Heat: {results['q_subcool_achieved_kw']:.1f} kW")
+            st.markdown('</div>', unsafe_allow_html=True)
+    
+    else:  # Evaporator
+        st.markdown("### 📊 Two-Region Evaporator Performance")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown('<div class="region-box region-condense">', unsafe_allow_html=True)
+            st.markdown("**🔵 Evaporation Region**")
+            st.write(f"Area: {results['area_evap_m2']:.1f} m²")
+            st.write(f"HTC: {results['h_tube_evap']:.0f} W/m²K")
+            st.write(f"U: {results['u_evap']:.0f} W/m²K")
+            st.write(f"NTU: {results['ntu_evap']:.2f}")
+            st.write(f"ε: {results['epsilon_evap']:.3f}")
+            st.write(f"Heat: {results['q_latent_achieved_kw']:.1f} kW")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="region-box region-desuperheat">', unsafe_allow_html=True)
+            st.markdown("**🔴 Superheating Region**")
+            st.write(f"Area: {results['area_superheat_m2']:.1f} m²")
+            st.write(f"HTC: {results['h_tube_superheat']:.0f} W/m²K")
+            st.write(f"U: {results['u_superheat']:.0f} W/m²K")
+            st.write(f"NTU: {results['ntu_superheat']:.2f}")
+            st.write(f"ε: {results['epsilon_superheat']:.3f}")
+            st.write(f"Heat: {results['q_superheat_achieved_kw']:.1f} kW")
+            st.markdown('</div>', unsafe_allow_html=True)
+
 def display_results(results: Dict, inputs: Dict):
     """Display calculation results"""
     
@@ -1591,7 +1980,7 @@ def display_results(results: Dict, inputs: Dict):
             <span class="dx-badge">DX Type</span>
             {display_glycol_badge(results['glycol_type'], results['glycol_percentage'])}
             <span style="margin-left: 10px; background-color: #FEF3C7; color: #92400E; padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.85rem;">
-                Mass Flow Input
+                Mass Flow Input | ε-NTU Method
             </span>
         </div>
         """
@@ -1602,7 +1991,7 @@ def display_results(results: Dict, inputs: Dict):
             <span class="condenser-badge">Condenser</span>
             {display_glycol_badge(results['glycol_type'], results['glycol_percentage'])}
             <span style="margin-left: 10px; background-color: #FEF3C7; color: #92400E; padding: 0.25rem 0.5rem; border-radius: 0.5rem; font-size: 0.85rem;">
-                Mass Flow Input
+                Mass Flow Input | ε-NTU Method
             </span>
         </div>
         """
@@ -1647,32 +2036,15 @@ def display_results(results: Dict, inputs: Dict):
             results['t_ref_out_achieved'],
             "Outlet Superheated Temperature"
         ), unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Inlet Quality:** {results['inlet_quality_percent']:.1f}%")
-            st.write(f"**Evaporating Temp:** {results['t_ref_in']:.1f} °C")
-            st.write(f"**Required Superheat:** {results['superheat_req']:.1f} K")
-        with col2:
-            st.write(f"**Latent Heat Required:** {results['q_latent_req_kw']:.1f} kW")
-            st.write(f"**Superheat Required:** {results['q_superheat_req_kw']:.1f} kW")
-            st.write(f"**Achieved Superheat:** {results['t_ref_out_achieved'] - results['t_ref_in']:.1f} K")
     else:
         st.markdown(display_temp_comparison(
             results['t_ref_out_required'],
             results['t_ref_out_achieved'],
             "Outlet Subcooled Temperature"
         ), unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Superheated Inlet:** {results['t_ref_in_superheated']:.1f} °C")
-            st.write(f"**Condensing Temp:** {results['t_ref_condensing']:.1f} °C")
-            st.write(f"**Required Subcool:** {results['subcool_req']:.1f} K")
-        with col2:
-            st.write(f"**Desuperheat Required:** {results['q_desuperheat_req_kw']:.1f} kW")
-            st.write(f"**Latent Heat Required:** {results['q_latent_req_kw']:.1f} kW")
-            st.write(f"**Subcool Required:** {results['q_subcool_req_kw']:.1f} kW")
+    
+    # Region-by-region performance
+    display_region_performance(results, results["heat_exchanger_type"])
     
     st.markdown("---")
     
@@ -1698,6 +2070,8 @@ def display_results(results: Dict, inputs: Dict):
         
         st.markdown(f"**Velocity:** {display_velocity_indicator(results['velocity_tube_ms'], results['velocity_tube_status'])}", unsafe_allow_html=True)
         st.write(f"**Pressure Drop:** {results['dp_tube_kpa']:.2f} kPa")
+        st.write(f"**Reynolds:** {results['reynolds_tube']:,.0f}")
+        st.write(f"**Mass Flux:** {results['mass_flux_tube']:.1f} kg/m²s")
         
         if results["heat_exchanger_type"] == "DX Evaporator":
             st.write(f"**Distribution:** {results['distribution_status']}")
@@ -1713,6 +2087,8 @@ def display_results(results: Dict, inputs: Dict):
         
         st.markdown(f"**Velocity:** {display_velocity_indicator(results['velocity_shell_ms'], results['velocity_shell_status'])}", unsafe_allow_html=True)
         st.write(f"**Pressure Drop:** {results['dp_shell_kpa']:.2f} kPa")
+        st.write(f"**Reynolds:** {results['reynolds_shell']:,.0f}")
+        st.write(f"**Mass Flux:** {results['mass_flux_shell']:.1f} kg/m²s")
         
         if results["heat_exchanger_type"] == "DX Evaporator" and results['glycol_percentage'] > 0:
             st.write(f"**Freeze Point:** {results['freeze_point_c']:.1f}°C")
@@ -1728,9 +2104,16 @@ def display_results(results: Dict, inputs: Dict):
     with col1:
         st.markdown("#### Heat Transfer")
         st.write(f"**Overall U:** {results['overall_u']:.1f} W/m²K")
-        st.write(f"**Tube HTC:** {results['h_tube']:.0f} W/m²K")
         st.write(f"**Shell HTC:** {results['h_shell']:.0f} W/m²K")
         st.write(f"**LMTD:** {results['lmtd']:.1f} K")
+        
+        if results["heat_exchanger_type"] == "Condenser":
+            st.write(f"**Desuperheat HTC:** {results['h_tube_desuperheat']:.0f} W/m²K")
+            st.write(f"**Condense HTC:** {results['h_tube_condense']:.0f} W/m²K")
+            st.write(f"**Subcool HTC:** {results['h_tube_subcool']:.0f} W/m²K")
+        else:
+            st.write(f"**Evaporation HTC:** {results['h_tube_evap']:.0f} W/m²K")
+            st.write(f"**Superheat HTC:** {results['h_tube_superheat']:.0f} W/m²K")
     
     with col2:
         st.markdown("#### Geometry")
@@ -1740,14 +2123,23 @@ def display_results(results: Dict, inputs: Dict):
         st.write(f"**Tube Pitch:** {results['tube_pitch_mm']:.1f} mm")
         st.write(f"**Pitch/OD Ratio:** {results['pitch_ratio']:.2f}")
         st.write(f"**Tube Layout:** {inputs['tube_layout']}")
+        st.write(f"**Baffle Spacing:** {results['baffle_spacing_m']:.2f} m")
+        st.write(f"**Number of Baffles:** {results['n_baffles']}")
     
     with col3:
+        st.markdown("#### Capacity Rates")
+        st.write(f"**Water Capacity:** {results['c_water']/1000:.1f} kW/K")
+        
+        if results["heat_exchanger_type"] == "Condenser":
+            st.write(f"**Refrigerant (Desuperheat):** {results.get('c_ref_desuperheat', 0)/1000:.1f} kW/K")
+            st.write(f"**Refrigerant (Subcool):** {results.get('c_ref_subcool', 0)/1000:.1f} kW/K")
+        else:
+            st.write(f"**Refrigerant (Superheat):** {results.get('c_ref_superheat', 0)/1000:.1f} kW/K")
+        
         st.markdown("#### Flow Characteristics")
-        st.write(f"**Tube Re:** {results['reynolds_tube']:,.0f}")
-        st.write(f"**Shell Re:** {results['reynolds_shell']:,.0f}")
-        st.write(f"**Tube Mass Flux:** {results['mass_flux_tube']:.1f} kg/m²s")
-        st.write(f"**Shell Mass Flux:** {results['mass_flux_shell']:.1f} kg/m²s")
-        st.write(f"**Baffle Spacing:** {results['baffle_spacing_m']:.2f} m")
+        st.write(f"**Area Total:** {results['area_total_m2']:.2f} m²")
+        st.write(f"**Area Required:** {results['area_required_m2']:.2f} m²")
+        st.write(f"**Area Ratio:** {results['area_ratio']:.2f}")
     
     st.markdown("---")
     
@@ -1759,29 +2151,31 @@ def display_results(results: Dict, inputs: Dict):
         **DESIGN INADEQUATE**
         
         **Issues:**
-        1. Heat duty mismatch: {results['kw_match_percentage']:.1f}% (target 90-110%)
-        2. Effectiveness: {results['effectiveness']:.3f} (target ≥0.7)
-        3. Area ratio: {results['area_ratio']:.2f} (target ≥0.95)
+        1. Heat duty mismatch: {results['kw_match_percentage']:.1f}% (target 85-115%)
+        2. Effectiveness: {results['effectiveness']:.3f} (target ≥0.6)
+        3. Area ratio: {results['area_ratio']:.2f} (target ≥0.9)
         
         **Solutions:**
         1. {'Increase water flow rate' if results['heat_duty_achieved_kw'] < results['heat_duty_required_kw'] else 'Decrease water flow rate'}
         2. Add more tubes or increase tube length
         3. Reduce tube pitch to fit more tubes
-        4. {'Increase refrigerant mass flow if compressor allows' if results['heat_duty_achieved_kw'] < results['heat_duty_required_kw'] else 'Check if compressor can handle lower load'}
+        4. Consider enhanced tube surfaces
+        5. {'Increase refrigerant mass flow if compressor allows' if results['heat_duty_achieved_kw'] < results['heat_duty_required_kw'] else 'Check if compressor can handle lower load'}
         """)
     elif results['design_status'] == "Marginal":
         st.warning(f"""
         **DESIGN MARGINAL**
         
         **Considerations:**
-        1. Heat duty match: {results['kw_match_percentage']:.1f}% (target 90-110%)
-        2. Effectiveness: {results['effectiveness']:.3f} (target ≥0.7)
-        3. Area ratio: {results['area_ratio']:.2f} (target ≥0.95)
+        1. Heat duty match: {results['kw_match_percentage']:.1f}% (target 85-115%)
+        2. Effectiveness: {results['effectiveness']:.3f} (target ≥0.6)
+        3. Area ratio: {results['area_ratio']:.2f} (target ≥0.9)
         
         **Recommendations:**
-        1. Fine-tune water flow rate
+        1. Fine-tune water flow rate (±10-20%)
         2. Consider minor geometry adjustments
         3. Monitor performance in operation
+        4. Consider safety factor of 10-20%
         """)
     else:
         st.success(f"""
@@ -1813,7 +2207,7 @@ def display_results(results: Dict, inputs: Dict):
     if results["heat_exchanger_type"] == "DX Evaporator":
         st.markdown("### ⚠️ DX-Specific Considerations")
         
-        if results['distribution_status'] == "Poor":
+        if results.get('distribution_status', 'Good') == "Poor":
             st.error(f"""
             **POOR REFRIGERANT DISTRIBUTION**
             
@@ -1826,7 +2220,7 @@ def display_results(results: Dict, inputs: Dict):
             4. Consider individual TXVs per circuit
             """)
         
-        if results['freeze_risk'] in ["High", "Medium"]:
+        if results.get('freeze_risk', 'Low') in ["High", "Medium"]:
             st.warning(f"""
             **FREEZE RISK DETECTED**
             
@@ -1839,9 +2233,9 @@ def display_results(results: Dict, inputs: Dict):
             4. Monitor temperature closely
             """)
         
-        if results.get('t_ref_out_achieved', results['t_ref_in'] + results['superheat_req']) - results['t_ref_in'] < 3.0:
+        if results.get('superheat_difference', 0) < -2.0:
             st.warning(f"""
-            **LOW ACHIEVED SUPERHEAT** ({(results.get('t_ref_out_achieved', results['t_ref_in'] + results['superheat_req']) - results['t_ref_in']):.1f} K)
+            **LOW ACHIEVED SUPERHEAT** ({results.get('superheat_difference', 0):.1f} K difference)
             
             TXV requires 3-8K superheat for proper operation.
             
@@ -1877,47 +2271,51 @@ def display_results(results: Dict, inputs: Dict):
                     "Required Latent Heat (kW)", "Achieved Latent Heat (kW)",
                     "Required Superheat Duty (kW)", "Achieved Superheat Duty (kW)",
                     "Glycol Type", "Glycol Percentage", "Freeze Point (°C)",
-                    "Effectiveness", "NTU", "Overall U (W/m²K)",
-                    "Tube HTC (W/m²K)", "Shell HTC (W/m²K)", "LMTD (K)",
+                    "Effectiveness (ε)", "NTU", "Overall U (W/m²K)",
+                    "Evaporation HTC (W/m²K)", "Superheat HTC (W/m²K)", 
+                    "Shell HTC (W/m²K)", "LMTD (K)",
                     "Water Flow Rate (L/hr)", "Water Mass Flow (kg/hr)",
                     "Water Inlet Temp (°C)", "Water Outlet Temp (°C)",
                     "Water ΔT (K)", "Shell Diameter (mm)", "Tube OD (mm)",
                     "Tube ID (mm)", "Tube Pitch (mm)", "Pitch/OD Ratio",
                     "Tube Layout", "Number of Tubes", "Tube Length (m)",
                     "Tube Passes", "Number of Baffles", "Baffle Spacing (m)",
-                    "Total Area (m²)", "Required Area (m²)", "Area Ratio",
+                    "Total Area (m²)", "Evaporation Area (m²)", "Superheat Area (m²)",
+                    "Required Area (m²)", "Area Ratio",
                     "Water Velocity (m/s)", "Velocity Status", "Refrigerant Velocity (m/s)",
                     "Shell ΔP (kPa)", "Tube ΔP (kPa)", "Shell Reynolds",
                     "Tube Reynolds", "Flow per Tube (kg/hr)", "Distribution Status",
                     "Freeze Risk", "Design Status"
                 ],
                 "Value": [
-                    results["heat_exchanger_type"], "Mass Flow Input", inputs["refrigerant"],
+                    results["heat_exchanger_type"], "Mass Flow Input (ε-NTU)", inputs["refrigerant"],
                     f"{results['refrigerant_mass_flow_kg_s']:.3f}", f"{results['refrigerant_mass_flow_kg_hr']:.1f}",
                     f"{results['inlet_quality_percent']:.1f}", f"{results['t_ref_in']:.1f}",
-                    f"{results['superheat_req']:.1f}", f"{results['t_ref_out_required']:.1f}",
-                    f"{results['t_ref_out_achieved']:.1f}", f"{results['superheat_difference']:.1f}",
+                    f"{results.get('superheat_req', 0):.1f}", f"{results['t_ref_out_required']:.1f}",
+                    f"{results['t_ref_out_achieved']:.1f}", f"{results.get('superheat_difference', 0):.1f}",
                     f"{results['heat_duty_required_kw']:.1f}", f"{results['heat_duty_achieved_kw']:.1f}",
                     f"{results['kw_difference']:.1f}", f"{results['kw_match_percentage']:.1f}",
                     f"{results['q_latent_req_kw']:.1f}", f"{results['q_latent_achieved_kw']:.1f}",
                     f"{results['q_superheat_req_kw']:.1f}", f"{results['q_superheat_achieved_kw']:.1f}",
                     results['glycol_type'].title(), f"{results['glycol_percentage']}%", f"{results.get('freeze_point_c', 0):.1f}",
                     f"{results['effectiveness']:.3f}", f"{results['ntu']:.2f}", f"{results['overall_u']:.1f}",
-                    f"{results['h_tube']:.0f}", f"{results['h_shell']:.0f}", f"{results['lmtd']:.1f}",
+                    f"{results['h_tube_evap']:.0f}", f"{results['h_tube_superheat']:.0f}",
+                    f"{results['h_shell']:.0f}", f"{results['lmtd']:.1f}",
                     f"{results['water_vol_flow_L_hr']:,.0f}", f"{results['water_mass_flow_kg_hr']:,.0f}",
                     f"{results['t_sec_in']:.1f}", f"{results['t_sec_out']:.1f}",
                     f"{results['water_deltaT']:.1f}", f"{results['shell_diameter_m']*1000:.0f}",
                     f"{results['tube_od_mm']:.1f}", f"{results['tube_id_mm']:.1f}",
                     f"{results['tube_pitch_mm']:.1f}", f"{results['pitch_ratio']:.2f}",
                     inputs['tube_layout'], str(inputs['n_tubes']), f"{inputs['tube_length']}",
-                    str(inputs['n_passes']), str(inputs['n_baffles']), f"{results['baffle_spacing_m']:.3f}",
-                    f"{results['area_total_m2']:.2f}", f"{results['area_required_m2']:.2f}",
+                    str(inputs['n_passes']), str(results['n_baffles']), f"{results['baffle_spacing_m']:.3f}",
+                    f"{results['area_total_m2']:.2f}", f"{results.get('area_evap_m2', 0):.2f}",
+                    f"{results.get('area_superheat_m2', 0):.2f}", f"{results['area_required_m2']:.2f}",
                     f"{results['area_ratio']:.2f}", f"{results['velocity_shell_ms']:.2f}",
                     results['velocity_shell_status']['status'], f"{results['velocity_tube_ms']:.2f}",
                     f"{results['dp_shell_kpa']:.2f}", f"{results['dp_tube_kpa']:.2f}",
                     f"{results['reynolds_shell']:,.0f}", f"{results['reynolds_tube']:,.0f}",
-                    f"{results['flow_per_tube_kg_hr']:.1f}", results['distribution_status'],
-                    results['freeze_risk'], results['design_status']
+                    f"{results.get('flow_per_tube_kg_hr', 0):.1f}", results.get('distribution_status', 'N/A'),
+                    results.get('freeze_risk', 'N/A'), results['design_status']
                 ],
                 "Unit": [
                     "", "", "",
@@ -1931,7 +2329,8 @@ def display_results(results: Dict, inputs: Dict):
                     "kW", "kW",
                     "", "", "°C",
                     "-", "-", "W/m²K",
-                    "W/m²K", "W/m²K", "K",
+                    "W/m²K", "W/m²K",
+                    "W/m²K", "K",
                     "L/hr", "kg/hr",
                     "°C", "°C",
                     "K", "mm",
@@ -1939,8 +2338,9 @@ def display_results(results: Dict, inputs: Dict):
                     "-", "", "",
                     "m", "", "",
                     "m", "m²", "m²",
-                    "-", "m/s", "",
-                    "m/s", "kPa", "kPa",
+                    "m²", "m²", "-",
+                    "m/s", "", "m/s",
+                    "kPa", "kPa",
                     "-", "-", "kg/hr",
                     "", "", ""
                 ]
@@ -1959,21 +2359,23 @@ def display_results(results: Dict, inputs: Dict):
                     "Required Latent Heat (kW)", "Achieved Latent Heat (kW)",
                     "Required Subcool Duty (kW)", "Achieved Subcool Duty (kW)",
                     "Glycol Type", "Glycol Percentage",
-                    "Effectiveness", "NTU", "Overall U (W/m²K)",
-                    "Tube HTC (W/m²K)", "Shell HTC (W/m²K)", "LMTD (K)",
+                    "Effectiveness (ε)", "NTU", "Overall U (W/m²K)",
+                    "Desuperheat HTC (W/m²K)", "Condense HTC (W/m²K)", 
+                    "Subcool HTC (W/m²K)", "Shell HTC (W/m²K)", "LMTD (K)",
                     "Water Flow Rate (L/hr)", "Water Mass Flow (kg/hr)",
                     "Water Inlet Temp (°C)", "Water Outlet Temp (°C)",
                     "Water ΔT (K)", "Shell Diameter (mm)", "Tube OD (mm)",
                     "Tube ID (mm)", "Tube Pitch (mm)", "Pitch/OD Ratio",
                     "Tube Layout", "Number of Tubes", "Tube Length (m)",
                     "Tube Passes", "Number of Baffles", "Baffle Spacing (m)",
-                    "Total Area (m²)", "Required Area (m²)", "Area Ratio",
+                    "Total Area (m²)", "Desuperheat Area (m²)", "Condense Area (m²)",
+                    "Subcool Area (m²)", "Required Area (m²)", "Area Ratio",
                     "Water Velocity (m/s)", "Velocity Status", "Refrigerant Velocity (m/s)",
                     "Shell ΔP (kPa)", "Tube ΔP (kPa)", "Shell Reynolds",
                     "Tube Reynolds", "Design Status"
                 ],
                 "Value": [
-                    results["heat_exchanger_type"], "Mass Flow Input", inputs["refrigerant"],
+                    results["heat_exchanger_type"], "Mass Flow Input (ε-NTU)", inputs["refrigerant"],
                     f"{results['refrigerant_mass_flow_kg_s']:.3f}", f"{results['refrigerant_mass_flow_kg_hr']:.1f}",
                     f"{results['t_ref_in_superheated']:.1f}", f"{results['t_ref_condensing']:.1f}",
                     f"{results['subcool_req']:.1f}", f"{results['t_ref_out_required']:.1f}",
@@ -1985,20 +2387,22 @@ def display_results(results: Dict, inputs: Dict):
                     f"{results['q_subcool_req_kw']:.1f}", f"{results['q_subcool_achieved_kw']:.1f}",
                     results['glycol_type'].title(), f"{results['glycol_percentage']}%",
                     f"{results['effectiveness']:.3f}", f"{results['ntu']:.2f}", f"{results['overall_u']:.1f}",
-                    f"{results['h_tube']:.0f}", f"{results['h_shell']:.0f}", f"{results['lmtd']:.1f}",
+                    f"{results['h_tube_desuperheat']:.0f}", f"{results['h_tube_condense']:.0f}",
+                    f"{results['h_tube_subcool']:.0f}", f"{results['h_shell']:.0f}", f"{results['lmtd']:.1f}",
                     f"{results['water_vol_flow_L_hr']:,.0f}", f"{results['water_mass_flow_kg_hr']:,.0f}",
                     f"{results['t_sec_in']:.1f}", f"{results['t_sec_out']:.1f}",
                     f"{results['water_deltaT']:.1f}", f"{results['shell_diameter_m']*1000:.0f}",
                     f"{results['tube_od_mm']:.1f}", f"{results['tube_id_mm']:.1f}",
                     f"{results['tube_pitch_mm']:.1f}", f"{results['pitch_ratio']:.2f}",
                     inputs['tube_layout'], str(inputs['n_tubes']), f"{inputs['tube_length']}",
-                    str(inputs['n_passes']), str(inputs['n_baffles']), f"{results['baffle_spacing_m']:.3f}",
-                    f"{results['area_total_m2']:.2f}", f"{results['area_required_m2']:.2f}",
-                    f"{results['area_ratio']:.2f}", f"{results['velocity_shell_ms']:.2f}",
-                    results['velocity_shell_status']['status'], f"{results['velocity_tube_ms']:.2f}",
-                    f"{results['dp_shell_kpa']:.2f}", f"{results['dp_tube_kpa']:.2f}",
-                    f"{results['reynolds_shell']:,.0f}", f"{results['reynolds_tube']:,.0f}",
-                    results['design_status']
+                    str(inputs['n_passes']), str(results['n_baffles']), f"{results['baffle_spacing_m']:.3f}",
+                    f"{results['area_total_m2']:.2f}", f"{results.get('area_desuperheat_m2', 0):.2f}",
+                    f"{results.get('area_condense_m2', 0):.2f}", f"{results.get('area_subcool_m2', 0):.2f}",
+                    f"{results['area_required_m2']:.2f}", f"{results['area_ratio']:.2f}",
+                    f"{results['velocity_shell_ms']:.2f}", results['velocity_shell_status']['status'],
+                    f"{results['velocity_tube_ms']:.2f}", f"{results['dp_shell_kpa']:.2f}",
+                    f"{results['dp_tube_kpa']:.2f}", f"{results['reynolds_shell']:,.0f}",
+                    f"{results['reynolds_tube']:,.0f}", results['design_status']
                 ],
                 "Unit": [
                     "", "", "",
@@ -2013,6 +2417,7 @@ def display_results(results: Dict, inputs: Dict):
                     "kW", "kW",
                     "", "",
                     "-", "-", "W/m²K",
+                    "W/m²K", "W/m²K",
                     "W/m²K", "W/m²K", "K",
                     "L/hr", "kg/hr",
                     "°C", "°C",
@@ -2021,6 +2426,7 @@ def display_results(results: Dict, inputs: Dict):
                     "-", "", "",
                     "m", "", "",
                     "m", "m²", "m²",
+                    "m²", "m²", "m²",
                     "-", "m/s", "",
                     "m/s", "kPa", "kPa",
                     "-", "-", ""
@@ -2045,21 +2451,23 @@ def main():
         st.stop()
     
     st.markdown("<h1 class='main-header'>🌡️ DX Shell & Tube Heat Exchanger Designer</h1>", unsafe_allow_html=True)
-    st.markdown("### Direct Expansion (DX) Evaporator & Condenser | Mass Flow Input Only | Water/Glycol in Shell")
+    st.markdown("### Direct Expansion (DX) Evaporator & Condenser | ε-NTU Method | Mass Flow Input")
     
     # Important note
     st.info("""
-    **🔧 This tool designs DX (Direct Expansion) type shell & tube heat exchangers:**
-    - **Mass Flow Input Only:** Enter refrigerant mass flow from compressor specs
-    - **Refrigerant flows inside tubes** (evaporates or condenses)
-    - **Water/Glycol flows in shell side**
-    - **Supports both Ethylene and Propylene (Food Grade) glycols**
+    **🔧 This tool designs DX (Direct Expansion) type shell & tube heat exchangers using ε-NTU method:**
     
     **Key Features:**
-    - Calculates required kW from mass flow and temperature conditions
-    - Compares required vs achieved kW
-    - Compares required vs achieved outlet temperatures
-    - Shows detailed heat duty breakdown
+    - **Mass Flow Input Only** - Enter refrigerant mass flow from compressor specs
+    - **ε-NTU Method** - More accurate than LMTD for phase change applications
+    - **Multi-Region Analysis** - Separate calculation for each heat transfer region
+    - **Performance Comparison** - Required vs Achieved heat duty and temperatures
+    - **Enhanced Correlations** - Dobson & Chato for condensation, Shah for evaporation
+    
+    **Methods Used:**
+    - **Condenser:** Three regions (Desuperheat + Condense + Subcool) with ε-NTU
+    - **Evaporator:** Two regions (Evaporation + Superheat) with ε-NTU
+    - **Counterflow arrangement** assumed for maximum efficiency
     """)
     
     # Initialize session state
@@ -2078,7 +2486,7 @@ def main():
         button_label = "🚀 Calculate DX Evaporator Design" if inputs["hex_type"] == "DX Evaporator" else "🚀 Calculate Condenser Design"
         
         if st.sidebar.button(button_label, type="primary", use_container_width=True):
-            with st.spinner("Performing engineering calculations..."):
+            with st.spinner("Performing ε-NTU calculations..."):
                 designer = DXHeatExchangerDesign()
                 
                 # Convert hex_type for internal use
@@ -2102,32 +2510,23 @@ def main():
         
         # Quick tips
         st.sidebar.markdown("---")
-        with st.sidebar.expander("💡 Design Tips"):
-            if inputs["hex_type"] == "Condenser":
-                st.markdown("""
-                **For Condensers:**
-                1. **Superheated inlet:** Typically 10-30°C above condensing temp
-                2. **Subcooling:** 5-10K typical for good system performance
-                3. **Water temperature:** Higher water temp reduces LMTD
-                4. **Pressure drop:** Monitor refrigerant side pressure drop
-                
-                **Heat Duty Breakdown:**
-                - Desuperheating: Cooling vapor to saturation
-                - Condensing: Phase change at constant temperature
-                - Subcooling: Cooling liquid below saturation
-                """)
-            else:
-                st.markdown("""
-                **For DX Evaporators:**
-                1. **Inlet quality:** Typically 15-25% from TXV
-                2. **Superheat:** 3-8K required for TXV operation
-                3. **Distribution:** Check flow per tube for good distribution
-                4. **Freeze risk:** Monitor with glycol systems
-                
-                **Heat Duty Breakdown:**
-                - Evaporating: Phase change (based on inlet quality)
-                - Superheating: Heating vapor above saturation
-                """)
+        with st.sidebar.expander("💡 ε-NTU Method Benefits"):
+            st.markdown("""
+            **Why ε-NTU is better:**
+            1. **Handles phase change** - Refrigerant capacity → ∞ during condensation/evaporation
+            2. **Variable U** - Different HTC in each region
+            3. **Direct calculation** - No iteration needed for LMTD
+            4. **Better accuracy** - Especially for small temperature differences
+            
+            **For Condensers:**
+            - Region 1: Desuperheating (vapor cooling)
+            - Region 2: Condensing (phase change, C→∞)
+            - Region 3: Subcooling (liquid cooling)
+            
+            **For Evaporators:**
+            - Region 1: Evaporating (phase change, C→∞)
+            - Region 2: Superheating (vapor heating)
+            """)
     
     with col1:
         if st.session_state.results is not None:
@@ -2136,43 +2535,44 @@ def main():
             st.markdown("""
             ## 🔧 DX Heat Exchanger Design Tool
             
-            **Complete design tool for DX (Direct Expansion) shell & tube heat exchangers with MASS FLOW INPUT:**
+            **Advanced design tool using ε-NTU method for accurate phase-change heat exchanger design:**
             
-            ### **Design Method:**
+            ### **Design Methodology:**
             
-            **Mass Flow Input:**
-            - Enter refrigerant mass flow from compressor (kg/s)
-            - Program calculates required heat duty
-            - Compares required vs achieved performance
-            - Shows temperature and kW comparisons
+            **ε-NTU (Effectiveness - Number of Transfer Units) Method:**
+            - **ε = Q_actual / Q_max** - Effectiveness (0 to 1)
+            - **NTU = U·A / C_min** - Number of Transfer Units
+            - **Counterflow arrangement** for maximum efficiency
             
             ### **Enhanced Features:**
             
-            ✅ **For Condensers:**
-               - **Superheated inlet temperature** input
-               - Calculates desuperheating + condensing + subcooling
-               - Compares required vs achieved subcool temperature
+            ✅ **Multi-Region Analysis:**
+               - Condenser: 3 regions (Desuperheat + Condense + Subcool)
+               - Evaporator: 2 regions (Evaporation + Superheat)
+               - Separate HTC calculation for each region
+               - Region-by-region performance analysis
             
-            ✅ **For DX Evaporators:**
-               - **Inlet quality** from expansion valve
-               - Calculates evaporation + superheating
-               - Compares required vs achieved superheat temperature
+            ✅ **Advanced Correlations:**
+               - **Dobson & Chato** for condensation HTC
+               - **Shah correlation** for evaporation HTC
+               - **Gnielinski** for single-phase HTC
+               - **Bell-Delaware** for shell-side HTC
             
             ✅ **Performance Comparison:**
-               - Required vs Achieved kW
+               - Required vs Achieved heat duty
                - Required vs Achieved outlet temperatures
-               - Detailed heat duty breakdown
-               - Design adequacy assessment
+               - Detailed region-by-region breakdown
+               - Comprehensive design adequacy assessment
             
             ### **How to Use:**
             
             1. **Select heat exchanger type** (DX Evaporator or Condenser)
             2. **Enter refrigerant mass flow** (kg/s from compressor)
-            3. **{"Enter superheated inlet temp, condensing temp, and required subcool" if inputs["hex_type"] == "Condenser" else "Enter evaporating temp, inlet quality, and required superheat"}**
-            4. **Choose glycol type** and percentage (if needed)
-            5. **Configure geometry** (tubes, pitch, layout)
-            6. **Click Calculate** and review comparisons
-            7. **Optimize** based on recommendations
+            3. **{"Enter superheated inlet, condensing temp, and required subcool" if inputs["hex_type"] == "Condenser" else "Enter evaporating temp, inlet quality, and required superheat"}**
+            4. **Configure water/glycol side parameters**
+            5. **Set geometry parameters** (tubes, pitch, layout)
+            6. **Click Calculate** and review detailed results
+            7. **Optimize design** based on recommendations
             
             ### **Password Protected**
             Enter password: **Semaanju**
@@ -2182,8 +2582,8 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>🔧 <strong>DX Shell & Tube Heat Exchanger Designer</strong> | Mass Flow Input Only | Performance Comparison</p>
-        <p>🧪 Ethylene & Propylene Glycol Support | 🎯 Required vs Achieved Analysis | 📊 Detailed Heat Duty Breakdown</p>
+        <p>🔧 <strong>DX Shell & Tube Heat Exchanger Designer</strong> | ε-NTU Method | Multi-Region Analysis</p>
+        <p>🧪 Advanced Heat Transfer Correlations | 📊 Performance Comparison | 🎯 Region-by-Region Analysis</p>
         <p>⚠️ For flooded evaporators (water in tubes), use separate design tool</p>
     </div>
     """, unsafe_allow_html=True)
