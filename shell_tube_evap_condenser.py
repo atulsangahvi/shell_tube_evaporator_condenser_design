@@ -2786,41 +2786,83 @@ class PDFReportGenerator:
 def number_input_with_buttons(label: str, min_value: float, max_value: float, 
                             value: float, step: float, key: str, format: str = "%.1f",
                             help_text: str = None) -> float:
-    """Number input with +/- buttons"""
-    
+    """Number input with +/- buttons.
+
+    Important: Streamlit widgets keep their own state by widget-key. If the widget's stored value
+    becomes < min_value (e.g., user changes tube OD and pitch minimum increases), Streamlit will
+    raise StreamlitValueBelowMinError on rerun. To prevent this, we clamp BOTH:
+      - st.session_state[key] (our logical value)
+      - st.session_state[f"{key}_input"] (the widget's internal value)
+    """
+    # Ensure sane bounds even if upstream logic produces min>max temporarily
+    try:
+        min_v = float(min_value)
+    except Exception:
+        min_v = 0.0
+    try:
+        max_v = float(max_value)
+    except Exception:
+        max_v = min_v
+    if max_v < min_v:
+        max_v = min_v
+
+    def _clamp(x, default):
+        try:
+            xf = float(x)
+        except Exception:
+            xf = float(default)
+        if math.isnan(xf) or math.isinf(xf):
+            xf = float(default)
+        return min(max(xf, min_v), max_v)
+
+    # Initialize our logical value
     if key not in st.session_state:
         st.session_state[key] = value
-    
+    st.session_state[key] = _clamp(st.session_state.get(key), value)
+
+    # ALSO clamp the widget state (critical to avoid StreamlitValueBelowMinError)
+    widget_key = f"{key}_input"
+    if widget_key in st.session_state:
+        st.session_state[widget_key] = _clamp(st.session_state.get(widget_key), st.session_state[key])
+
     col1, col2, col3 = st.columns([1, 2, 1])
-    
+
     with col1:
         if st.button("−", key=f"{key}_minus"):
-            st.session_state[key] = max(min_value, st.session_state[key] - step)
+            st.session_state[key] = _clamp(st.session_state[key] - step, st.session_state[key])
+            st.session_state[widget_key] = st.session_state[key]
             st.rerun()
-    
+
     with col2:
         st.markdown(f"<div style='font-weight:500; margin-bottom:0.25rem;'>{label}</div>", unsafe_allow_html=True)
         if help_text:
             st.caption(help_text)
+
+        # Use the clamped widget value if it exists, otherwise our logical value
+        current_val = st.session_state.get(widget_key, st.session_state[key])
+        current_val = _clamp(current_val, st.session_state[key])
+
         value_input = st.number_input(
             label="",
-            min_value=min_value,
-            max_value=max_value,
-            value=st.session_state[key],
-            step=step,
-            key=f"{key}_input",
+            min_value=min_v,
+            max_value=max_v,
+            value=float(current_val),
+            step=float(step),
+            key=widget_key,
             label_visibility="collapsed",
             format=format
         )
-        st.session_state[key] = value_input
-    
+
+        # Keep logical value synchronized with widget
+        st.session_state[key] = _clamp(value_input, st.session_state[key])
+
     with col3:
         if st.button("＋", key=f"{key}_plus"):
-            st.session_state[key] = min(max_value, st.session_state[key] + step)
+            st.session_state[key] = _clamp(st.session_state[key] + step, st.session_state[key])
+            st.session_state[widget_key] = st.session_state[key]
             st.rerun()
-    
-    return st.session_state[key]
 
+    return float(st.session_state[key])
 
 def create_input_section():
     """Create TEMA-compliant input section"""
