@@ -848,7 +848,101 @@ class TEMACompliantDXHeatExchangerDesign:
         self.pitch_ratio = 1.25
         self.tema_vibration = TEMAVibrationAnalysis(self)
     
+    
     # ========================================================================
+    # TEMA VIBRATION WRAPPER (Used by condenser path)
+    # ========================================================================
+
+    def analyze_vibration_tema(self, vib: Dict) -> Dict:
+        """
+        Run a simplified TEMA Section 6 vibration screening using the same
+        underlying formulas already used in the evaporator path.
+
+        Inputs (vib dict) expected (SI units):
+          - tube_od_m, tube_id_m, baffle_spacing_m
+          - tube_material (key from TUBE_MATERIALS)
+          - shell_velocity_ms (crossflow / shell-side velocity to compare)
+          - shell_density (density of shell-side fluid)
+          - tube_density  (density of tube-side fluid; used only for added mass approx)
+          - tube_layout, pitch_ratio (optional; defaults applied)
+
+        Returns dict with keys:
+          natural_frequency_hz, critical_velocity_ms, actual_velocity_ms,
+          safety_factor, risk_level, tema_compliant
+        """
+        # Defaults
+        v_actual = float(vib.get("shell_velocity_ms", 0.0) or 0.0)
+
+        tube_od = float(vib.get("tube_od_m", 0.0) or 0.0)
+        tube_id = float(vib.get("tube_id_m", 0.0) or 0.0)
+        span = float(vib.get("baffle_spacing_m", 0.0) or 0.0)
+
+        tube_material = vib.get("tube_material", "Copper")
+        tube_layout = vib.get("tube_layout", "triangular")
+        pitch_ratio = float(vib.get("pitch_ratio", getattr(self, "pitch_ratio", 1.25)) or 1.25)
+
+        rho_shell = float(vib.get("shell_density", 1000.0) or 1000.0)
+        rho_added = float(vib.get("tube_density", rho_shell) or rho_shell)
+
+        # Guard: if not enough geometry, return "not analyzed" without crashing
+        if tube_od <= 0 or tube_id <= 0 or span <= 0:
+            return {
+                "natural_frequency_hz": 0.0,
+                "critical_velocity_ms": 0.0,
+                "actual_velocity_ms": round(v_actual, 3),
+                "safety_factor": 0.0,
+                "risk_level": "NOT ANALYZED",
+                "tema_compliant": True,
+                "note": "Insufficient geometry for vibration screening (OD/ID/span)."
+            }
+
+        # Material properties
+        mat = self.TUBE_MATERIALS.get(tube_material, self.TUBE_MATERIALS["Copper"])
+        E_tube_pa = float(mat.get("E_modulus_gpa", 110)) * 1e9
+        rho_tube = float(mat.get("density", 8960))
+
+        # Natural frequency
+        fn = self.tema_vibration.calculate_tube_natural_frequency(
+            tube_od, tube_id, span, E_tube_pa, rho_tube, rho_shell
+        )
+
+        # Effective mass (simplified): tube metal + contained/added fluid mass
+        A_metal = math.pi * (tube_od**2 - tube_id**2) / 4
+        m_effective = A_metal * rho_tube + (math.pi * tube_id**2 / 4) * rho_added
+
+        # Damping (logarithmic decrement) typical screening value
+        delta = float(vib.get("log_dec", 0.03) or 0.03)
+
+        Vc = self.tema_vibration.calculate_critical_velocity(
+            fn, tube_od, m_effective, delta, rho_shell, tube_layout, pitch_ratio
+        )
+
+        safety = (Vc / v_actual) if v_actual > 0 else 999.0
+
+        # Risk bands (simple)
+        if safety >= 2.0:
+            risk = "LOW"
+            compliant = True
+        elif safety >= 1.5:
+            risk = "MODERATE"
+            compliant = True
+        elif safety >= 1.0:
+            risk = "HIGH"
+            compliant = False
+        else:
+            risk = "SEVERE"
+            compliant = False
+
+        return {
+            "natural_frequency_hz": round(fn, 2),
+            "critical_velocity_ms": round(Vc, 3),
+            "actual_velocity_ms": round(v_actual, 3),
+            "safety_factor": round(safety, 2),
+            "risk_level": risk,
+            "tema_compliant": compliant
+        }
+
+# ========================================================================
     # COOLPROP PROPERTY METHODS
     # ========================================================================
     
@@ -1645,6 +1739,8 @@ class TEMACompliantDXHeatExchangerDesign:
             "tube_size": tube_size,
             "bwg": bwg,
             "tube_material": tube_material,
+            "tube_layout": tube_layout,
+            "pitch_ratio": (tube_pitch / tube_od if tube_od > 0 else 1.25),
             "tube_od_mm": tube_od * 1000,
             "tube_id_mm": tube_id * 1000,
             "tube_thickness_mm": tube_thickness * 1000,
@@ -2145,11 +2241,14 @@ class TEMACompliantDXHeatExchangerDesign:
         vibration_inputs = {
             "shell_diameter_m": shell_diameter,
             "tube_od_m": tube_od,
+            "tube_id_m": tube_id,
             "tube_pitch_m": tube_pitch,
             "baffle_spacing_m": baffle_spacing,
             "tube_length_m": tube_length,
             "n_tubes": n_tubes,
             "tube_material": tube_material,
+            "tube_layout": tube_layout,
+            "pitch_ratio": (tube_pitch / tube_od if tube_od > 0 else 1.25),
             "shell_velocity_ms": v_shell_report,
             "tube_velocity_ms": v_tube_report,
             "shell_density": (ref_props["rho_vapor"] if refrigerant_side == "shell" else sec_props["rho"]),
@@ -2223,6 +2322,8 @@ class TEMACompliantDXHeatExchangerDesign:
             "tube_size": tube_size,
             "bwg": bwg,
             "tube_material": tube_material,
+            "tube_layout": tube_layout,
+            "pitch_ratio": (tube_pitch / tube_od if tube_od > 0 else 1.25),
             "tube_od_mm": tube_od * 1000.0,
             "tube_id_mm": tube_id * 1000.0,
             "tube_thickness_mm": tube_thickness * 1000.0,
