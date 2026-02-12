@@ -2077,7 +2077,7 @@ class TEMACompliantDXHeatExchangerDesign:
         # ============================================================
         # TEMA Compliance Checks (populate keys for report)
         # ============================================================
-        tube_valid, tube_message = TEMATubeStandards.validate_tube_selection(tube_size, bwg)
+        tube_valid, tube_message = TEMATubeStandards.validate_tube_selection(tube_size, bwg, inputs.get("design_pressure_kpa", 1000))
 
         baffle_check = TEMABaffleStandards.validate_baffle_spacing(
             shell_diameter, baffle_spacing, tube_od, tema_class
