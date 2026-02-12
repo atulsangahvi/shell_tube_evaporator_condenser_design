@@ -2822,8 +2822,8 @@ def number_input_with_buttons(label: str, min_value: float, max_value: float,
 
     # ALSO clamp the widget state (critical to avoid StreamlitValueBelowMinError)
     widget_key = f"{key}_input"
-    if widget_key in st.session_state:
-        st.session_state[widget_key] = _clamp(st.session_state.get(widget_key), st.session_state[key])
+    # Always force widget state into bounds. Streamlit may keep an old widget value that is now invalid.
+    st.session_state[widget_key] = _clamp(st.session_state.get(widget_key, st.session_state[key]), st.session_state[key])
 
     col1, col2, col3 = st.columns([1, 2, 1])
 
