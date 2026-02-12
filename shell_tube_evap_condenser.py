@@ -1077,25 +1077,47 @@ class TEMACompliantDXHeatExchangerDesign:
         
         return h_tp
     
-    def calculate_single_phase_htc(self, m_dot: float, D: float, rho: float, 
-                                 mu: float, k: float, cp: float, n_passes: int = 1) -> float:
-        """Calculate single-phase HTC"""
-        A_flow = math.pi * D**2 / 4
-        
-        if n_passes > 0:
-            v = m_dot / (rho * A_flow * n_passes)
-        else:
-            v = m_dot / (rho * A_flow)
-        
-        Re = rho * v * D / mu if mu > 0 else 0
-        Pr = mu * cp / k if k > 0 else 0
-        
+    def calculate_single_phase_htc(
+        self,
+        m_dot_total: float,
+        D: float,
+        rho: float,
+        mu: float,
+        k: float,
+        cp: float,
+        n_tubes: int = 1,
+        n_passes: int = 1,
+    ) -> float:
+        """Calculate single-phase HTC (Gnielinski) with correct flow splitting across parallel tubes.
+
+        Notes
+        -----
+        For tube-side flow, the total mass flow is split across (n_tubes / n_passes) tubes in parallel per pass.
+        For non-tube geometries (e.g., shell-side equivalent diameter), call with n_tubes=1, n_passes=1 and supply
+        appropriate characteristic diameter D and velocity separately if needed.
+        """
+        # Guardrails
+        n_tubes = max(int(n_tubes), 1)
+        n_passes = max(int(n_passes), 1)
+
+        # Parallel tubes per pass
+        n_parallel = max(n_tubes / n_passes, 1.0)
+
+        # Total flow area across parallel tubes
+        A_single = math.pi * D**2 / 4
+        A_total = A_single * n_parallel
+
+        v = m_dot_total / (rho * A_total) if (rho > 0 and A_total > 0) else 0.0
+
+        Re = rho * v * D / mu if mu > 0 else 0.0
+        Pr = mu * cp / k if k > 0 else 0.0
+
         if Re > 0 and Pr > 0:
             Nu = self.gnielinski_single_phase(Re, Pr)
             h = Nu * k / D
         else:
-            h = 100
-        
+            h = 100.0
+
         return h
     
     def epsilon_ntu_counterflow(self, NTU: float, C_r: float) -> float:
@@ -1294,9 +1316,9 @@ class TEMACompliantDXHeatExchangerDesign:
         
         # Tube-side superheat HTC
         h_superheat = self.calculate_single_phase_htc(
-            m_dot_ref, tube_id, ref_props["rho_vapor"], 
+            m_dot_ref, tube_id, ref_props["rho_vapor"],
             ref_props["mu_vapor"], ref_props["k_vapor"],
-            ref_props["cp_vapor"] * 1000, n_passes
+            ref_props["cp_vapor"] * 1000, n_tubes, n_passes
         )
         
         # Tube material thermal conductivity
@@ -1675,255 +1697,471 @@ class TEMACompliantDXHeatExchangerDesign:
     # ========================================================================
     
     def design_condenser(self, inputs: Dict) -> Dict:
-        """
-        Design condenser - TEMA compliant
-        CORRECT CONFIGURATION: Refrigerant on SHELL SIDE, Water/Glycol in TUBES
+        """Design condenser (TEMA-aware).
+
+        Default configuration (common practice):
+        - Refrigerant condensing on SHELL side
+        - Water/Glycol in TUBES (easy cleaning)
+
+        Optional configuration:
+        - Refrigerant in TUBES
+        - Water/Glycol on SHELL side
+
+        Notes:
+        - Thermal correlations already implemented in this tool are preserved.
+        - Some shell-side single-phase calculations (when water is on shell side) use an equivalent-diameter
+          Gnielinski approach as an engineering estimate; a warning is provided in that mode.
         """
         self.warnings = []
-        
-        # Unpack inputs
+
+        # --- Inputs ---
         refrigerant = inputs["refrigerant"]
-        m_dot_ref = inputs["m_dot_ref"]  # Shell side
-        T_ref_in_superheated = inputs["T_ref_in_superheated"]
-        T_cond = inputs["T_ref"]
-        subcool_req = inputs["delta_T_sh_sc"]
-        
+        m_dot_ref = float(inputs["m_dot_ref"])  # kg/s
+        T_ref_in_superheated = float(inputs["T_ref_in_superheated"])
+        T_cond = float(inputs["T_ref"])
+        subcool_req = float(inputs["delta_T_sh_sc"])
+
+        refrigerant_side = inputs.get("condenser_refrigerant_side", "shell").strip().lower()
+        if refrigerant_side not in ("shell", "tube"):
+            refrigerant_side = "shell"
+
         # Refrigerant properties at condensing temperature
         ref_props = self.get_refrigerant_properties(refrigerant, T_cond)
-        
-        # Water/glycol properties (tube side)
-        glycol_percent = inputs["glycol_percentage"]
+
+        # Secondary fluid properties
+        glycol_percent = float(inputs["glycol_percentage"])
         glycol_type = inputs.get("glycol_type", "ethylene")
-        m_dot_sec_L = inputs["m_dot_sec"] / 3600  # L/hr to L/s
-        T_sec_in = inputs["T_sec_in"]
-        
+        m_dot_sec_L = float(inputs["m_dot_sec"]) / 3600.0  # L/hr -> L/s
+        T_sec_in = float(inputs["T_sec_in"])
         sec_props = self.get_glycol_properties(glycol_type, glycol_percent, T_sec_in)
-        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000  # kg/s - TUBE SIDE
-        
-        # Geometry parameters
+        m_dot_sec_kg = m_dot_sec_L * sec_props["rho"] / 1000.0  # kg/s
+
+        # --- Geometry / TEMA selections ---
         tube_size = inputs["tube_size"]
-        bwg = inputs.get("bwg", "18")  # BWG gauge
+        bwg = inputs.get("bwg", "18")
         tube_material = inputs["tube_material"]
-        tube_pitch = inputs["tube_pitch"] / 1000  # mm to m
-        n_passes = inputs["n_passes"]
-        n_baffles = inputs["n_baffles"]
-        n_tubes = inputs["n_tubes"]
-        tube_length = inputs["tube_length"]
+        tube_pitch = float(inputs["tube_pitch"]) / 1000.0  # mm -> m
+        n_passes = int(inputs["n_passes"])
+        n_baffles = int(inputs["n_baffles"])
+        n_tubes = int(inputs["n_tubes"])
+        tube_length = float(inputs["tube_length"])
         tube_layout = inputs["tube_layout"].lower()
         tema_class = inputs.get("tema_class", "R")
-        
-        # Get tube dimensions from TEMA standards
+        tema_type = inputs.get("tema_type", "AES")
+
+        # Tube dimensions from TEMA standards
         tube_od_mm = TEMATubeStandards.get_tube_od_mm(tube_size)
-        tube_od = tube_od_mm / 1000  # Convert to meters
-        
-        # Get wall thickness from BWG
+        tube_od = tube_od_mm / 1000.0
         tube_thickness_mm = TEMATubeStandards.get_tube_thickness(tube_size, bwg)
-        tube_thickness = tube_thickness_mm / 1000
-        tube_id = max(tube_od - 2 * tube_thickness, tube_od * 0.8)
-        
-        # TUBE SIDE - Cooling water
-        A_flow_tube = (math.pi * tube_id**2 / 4) * n_tubes / max(n_passes, 1)
-        v_tube = m_dot_sec_kg / (sec_props["rho"] * A_flow_tube) if A_flow_tube > 0 else 0
-        Re_tube = sec_props["rho"] * v_tube * tube_id / sec_props["mu"] if sec_props["mu"] > 0 else 0
-        
-        # Tube-side HTC (cooling water)
-        h_tube = self.calculate_single_phase_htc(
-            m_dot_sec_kg, tube_id, sec_props["rho"],
-            sec_props["mu"], sec_props["k"],
-            sec_props["cp"], n_passes
-        )
-        
-        # SHELL SIDE - Refrigerant condensing
+        tube_thickness = tube_thickness_mm / 1000.0
+        tube_id = max(tube_od - 2.0 * tube_thickness, tube_od * 0.8)
+
+        # --- Bundle/Shell geometry ---
         shell_diameter = self.calculate_shell_diameter(tube_od, n_tubes, tube_pitch, tube_layout)
-        
-        # Calculate equivalent diameter for shell-side condensation
+
+        # Equivalent diameter for shell-side (tube bundle passages)
         if tube_layout == "triangular":
-            D_e = 4 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2 / 4) / (math.pi * tube_od)
+            D_e = 4.0 * (0.866 * tube_pitch**2 - 0.5 * math.pi * tube_od**2 / 4.0) / (math.pi * tube_od)
         else:
-            D_e = 4 * (tube_pitch**2 - math.pi * tube_od**2 / 4) / (math.pi * tube_od)
-        
-        # Baffle geometry
+            D_e = 4.0 * (tube_pitch**2 - math.pi * tube_od**2 / 4.0) / (math.pi * tube_od)
+
         baffle_spacing = tube_length / (n_baffles + 1)
-        baffle_cut = inputs.get("baffle_cut", 25) / 100
+        baffle_cut = float(inputs.get("baffle_cut", 25)) / 100.0
         bundle_diameter = self.calculate_bundle_diameter(tube_od, n_tubes, tube_pitch, tube_layout)
-        
-        # Shell-side flow area
+
         shell_flow_area = self.calculate_shell_side_flow_area(
             shell_diameter, bundle_diameter, tube_od, n_tubes, baffle_spacing, baffle_cut
         )
-        
-        # Shell-side refrigerant mass velocity
-        G_ref_shell = m_dot_ref / shell_flow_area if shell_flow_area > 0 else 0
-        v_shell = G_ref_shell / ref_props["rho_vapor"]  # Vapor velocity at inlet
-        
-        # Shell-side condensation HTC (Dobson-Chato on tube bundle)
-        h_condense = self.dobson_chato_improved(
-            G_ref_shell, tube_od, T_cond,  # Note: using tube_od, not tube_id
-            ref_props["rho_liquid"], ref_props["rho_vapor"],
-            ref_props["mu_liquid"], ref_props["mu_vapor"],
-            ref_props["k_liquid"], ref_props["cp_liquid"] * 1000,
-            ref_props["h_fg"] * 1000, x=0.5
-        )
-        
-        # Desuperheating and subcooling HTC (single phase)
-        h_desuperheat = self.calculate_single_phase_htc(
-            m_dot_ref, tube_od, ref_props["rho_vapor"],
-            ref_props["mu_vapor"], ref_props["k_vapor"],
-            ref_props["cp_vapor"] * 1000, 1  # Shell side, single pass
-        )
-        
-        h_subcool = self.calculate_single_phase_htc(
-            m_dot_ref, tube_od, ref_props["rho_liquid"],
-            ref_props["mu_liquid"], ref_props["k_liquid"],
-            ref_props["cp_liquid"] * 1000, 1
-        )
-        
-        # Tube material thermal conductivity
-        tube_k = self.TUBE_MATERIALS[tube_material]["k"]
-        
-        # Wall resistance (based on tube OD)
-        R_wall = tube_od * math.log(tube_od / tube_id) / (2 * tube_k) if tube_k > 0 else 0
-        
-        # Fouling resistances - TEMA values
-        R_fouling_tube = TEMAFoulingResistances.get_fouling_resistance(
-            "cooling_tower_treated" if glycol_percent == 0 else "ethylene_glycol",
-            T_sec_in, v_tube
-        )
-        R_fouling_shell = TEMAFoulingResistances.get_fouling_resistance(
-            "refrigerant_vapor_oil", T_cond, v_shell
-        )
-        
-        # Overall U values (based on tube OD)
-        U_condense = 1 / (1/h_condense + 1/h_tube * (tube_od/tube_id) + R_wall + 
-                         R_fouling_shell + R_fouling_tube * (tube_od/tube_id))
-        U_desuperheat = 1 / (1/h_desuperheat + 1/h_tube * (tube_od/tube_id) + R_wall + 
-                           R_fouling_shell + R_fouling_tube * (tube_od/tube_id))
-        U_subcool = 1 / (1/h_subcool + 1/h_tube * (tube_od/tube_id) + R_wall + 
-                        R_fouling_shell + R_fouling_tube * (tube_od/tube_id))
-        
+
+        # --- Tube material thermal conductivity + wall resistance ---
+        tube_k = self.TUBE_MATERIALS.get(tube_material, {}).get("k", 16.0)
+        R_wall = math.log(tube_od / tube_id) / (2.0 * math.pi * tube_k * tube_length)  # per tube
+
+        # ============================================================
+        # SIDE ASSIGNMENT
+        # ============================================================
+        if refrigerant_side == "shell":
+            # --------------------------------------------------------
+            # Tube side: water/glycol
+            # --------------------------------------------------------
+            A_flow_tube = (math.pi * tube_id**2 / 4.0) * n_tubes / max(n_passes, 1)
+            v_tube = m_dot_sec_kg / (sec_props["rho"] * A_flow_tube) if A_flow_tube > 0 else 0.0
+            Re_tube = sec_props["rho"] * v_tube * tube_id / sec_props["mu"] if sec_props["mu"] > 0 else 0.0
+
+            h_tube = self.calculate_single_phase_htc(
+                m_dot_sec_kg, tube_id, sec_props["rho"],
+                sec_props["mu"], sec_props["k"], sec_props["cp"],
+                n_tubes, n_passes
+            )
+
+            # --------------------------------------------------------
+            # Shell side: refrigerant (desuperheat + condense + subcool)
+            # --------------------------------------------------------
+            G_ref_shell = m_dot_ref / shell_flow_area if shell_flow_area > 0 else 0.0
+            v_shell = (G_ref_shell / ref_props["rho_vapor"]) if ref_props["rho_vapor"] > 0 else 0.0
+
+            # Condensation HTC (existing correlation retained)
+            h_condense = self.dobson_chato_improved(
+                G_ref_shell, tube_od, T_cond,
+                ref_props["rho_liquid"], ref_props["rho_vapor"],
+                ref_props["mu_liquid"], ref_props["mu_vapor"],
+                ref_props["k_liquid"], ref_props["cp_liquid"] * 1000.0,
+                ref_props["h_fg"] * 1000.0, x=0.5
+            )
+
+            # Single-phase shell-side estimates for superheat/subcool (engineering estimate)
+            # Preserve existing logic style: Gnielinski on equivalent diameter
+            # Vapor (desuperheat)
+            Re_shell_v = G_ref_shell * D_e / ref_props["mu_vapor"] if ref_props["mu_vapor"] > 0 else 0.0
+            Pr_shell_v = ref_props["mu_vapor"] * (ref_props["cp_vapor"] * 1000.0) / ref_props["k_vapor"] if ref_props["k_vapor"] > 0 else 0.0
+            Nu_shell_v = self.gnielinski_single_phase(Re_shell_v, Pr_shell_v) if (Re_shell_v > 0 and Pr_shell_v > 0) else 10.0
+            h_desuperheat = Nu_shell_v * ref_props["k_vapor"] / D_e if D_e > 0 else 100.0
+
+            # Liquid (subcool)
+            Re_shell_l = G_ref_shell * D_e / ref_props["mu_liquid"] if ref_props["mu_liquid"] > 0 else 0.0
+            Pr_shell_l = ref_props["mu_liquid"] * (ref_props["cp_liquid"] * 1000.0) / ref_props["k_liquid"] if ref_props["k_liquid"] > 0 else 0.0
+            Nu_shell_l = self.gnielinski_single_phase(Re_shell_l, Pr_shell_l) if (Re_shell_l > 0 and Pr_shell_l > 0) else 10.0
+            h_subcool = Nu_shell_l * ref_props["k_liquid"] / D_e if D_e > 0 else 100.0
+
+            # Fouling resistances
+            R_fouling_tube = TEMAFoulingResistances.get_fouling_resistance(
+                "cooling_tower_treated" if glycol_percent == 0 else f"{glycol_type}_glycol",
+                T_sec_in, v_tube
+            )
+            R_fouling_shell = TEMAFoulingResistances.get_fouling_resistance(
+                "refrigerant_vapor_oil", T_cond, v_shell
+            )
+
+            # Pressure drops (existing style preserved)
+            if Re_tube > 2300:
+                f_tube = (0.79 * math.log(Re_tube) - 1.64) ** -2 if Re_tube > 0 else 0.02
+            else:
+                f_tube = 64.0 / Re_tube if Re_tube > 0 else 0.05
+            dp_tube = f_tube * (tube_length * max(n_passes, 1) / tube_id) * (sec_props["rho"] * v_tube**2 / 2.0)
+
+            Re_shell = G_ref_shell * D_e / ref_props["mu_vapor"] if ref_props["mu_vapor"] > 0 else 0.0
+            if Re_shell < 2300:
+                f_shell = 64.0 / Re_shell if Re_shell > 0 else 0.2
+            else:
+                f_shell = 0.2 * Re_shell ** -0.2
+            dp_shell = f_shell * (tube_length / max(D_e, 1e-6)) * (n_baffles + 1) * (ref_props["rho_vapor"] * v_shell**2 / 2.0)
+
+            # Velocity status
+            tube_velocity_status = self.check_velocity_status(v_tube, glycol_percent, "water_glycol")
+            shell_velocity_status = self.check_velocity_status(v_shell, 0, "refrigerant")
+
+            # For reporting
+            v_shell_report = v_shell
+            v_tube_report = v_tube
+            Re_shell_report = Re_shell
+            Re_tube_report = Re_tube
+
+            # U calculations will use h_tube (tube) and h_* (shell)
+            h_shell_for_reporting = h_condense  # main shell HTC shown
+
+        else:
+            # --------------------------------------------------------
+            # Tube side: refrigerant (desuperheat + condense + subcool)
+            # --------------------------------------------------------
+            A_flow_ref = (math.pi * tube_id**2 / 4.0) * n_tubes / max(n_passes, 1)
+            v_ref = m_dot_ref / (ref_props["rho_vapor"] * A_flow_ref) if (A_flow_ref > 0 and ref_props["rho_vapor"] > 0) else 0.0
+            Re_ref_v = ref_props["rho_vapor"] * v_ref * tube_id / ref_props["mu_vapor"] if ref_props["mu_vapor"] > 0 else 0.0
+
+            # Single-phase inside-tube (existing correlation preserved)
+            h_desuperheat = self.calculate_single_phase_htc(
+                m_dot_ref, tube_id, ref_props["rho_vapor"],
+                ref_props["mu_vapor"], ref_props["k_vapor"], ref_props["cp_vapor"] * 1000.0,
+                n_tubes, n_passes
+            )
+
+            # Condensation inside tubes (use existing dobson-chato function; keep correlation)
+            G_ref_tube = m_dot_ref / A_flow_ref if A_flow_ref > 0 else 0.0
+            h_condense = self.dobson_chato_improved(
+                G_ref_tube, tube_id, T_cond,
+                ref_props["rho_liquid"], ref_props["rho_vapor"],
+                ref_props["mu_liquid"], ref_props["mu_vapor"],
+                ref_props["k_liquid"], ref_props["cp_liquid"] * 1000.0,
+                ref_props["h_fg"] * 1000.0, x=0.5
+            )
+
+            h_subcool = self.calculate_single_phase_htc(
+                m_dot_ref, tube_id, ref_props["rho_liquid"],
+                ref_props["mu_liquid"], ref_props["k_liquid"], ref_props["cp_liquid"] * 1000.0,
+                n_tubes, n_passes
+            )
+
+            # --------------------------------------------------------
+            # Shell side: water/glycol (engineering estimate)
+            # --------------------------------------------------------
+            if shell_flow_area <= 0:
+                shell_flow_area = 1e-6
+
+            G_sec_shell = m_dot_sec_kg / shell_flow_area
+            v_shell = G_sec_shell / sec_props["rho"] if sec_props["rho"] > 0 else 0.0
+            Re_shell = G_sec_shell * D_e / sec_props["mu"] if sec_props["mu"] > 0 else 0.0
+            Pr_shell = sec_props["mu"] * sec_props["cp"] / sec_props["k"] if sec_props["k"] > 0 else 0.0
+            Nu_shell = self.gnielinski_single_phase(Re_shell, Pr_shell) if (Re_shell > 0 and Pr_shell > 0) else 10.0
+            h_tube = Nu_shell * sec_props["k"] / D_e if D_e > 0 else 200.0  # here h_tube variable reused as shell HTC for legacy usage
+
+            self.warnings.append(
+                "Condenser mode: Water/Glycol on shell side uses equivalent-diameter Gnielinski estimate (conservative). "
+                "For detailed design, use a dedicated shell-side method (e.g., Kern/Bell-Delaware)."
+
+            )
+
+            # Fouling resistances (swap sides)
+            R_fouling_shell = TEMAFoulingResistances.get_fouling_resistance(
+                "cooling_tower_treated" if glycol_percent == 0 else f"{glycol_type}_glycol",
+                T_sec_in, v_shell
+            )
+            R_fouling_tube = TEMAFoulingResistances.get_fouling_resistance(
+                "refrigerant_vapor_oil", T_cond, v_ref
+            )
+
+            # Pressure drops (rough, preserve style)
+            if Re_ref_v > 2300:
+                f_tube = (0.79 * math.log(Re_ref_v) - 1.64) ** -2 if Re_ref_v > 0 else 0.02
+            else:
+                f_tube = 64.0 / Re_ref_v if Re_ref_v > 0 else 0.05
+            dp_tube = f_tube * (tube_length * max(n_passes, 1) / tube_id) * (ref_props["rho_vapor"] * v_ref**2 / 2.0)
+
+            if Re_shell < 2300:
+                f_shell = 64.0 / Re_shell if Re_shell > 0 else 0.2
+            else:
+                f_shell = 0.2 * Re_shell ** -0.2
+            dp_shell = f_shell * (tube_length / max(D_e, 1e-6)) * (n_baffles + 1) * (sec_props["rho"] * v_shell**2 / 2.0)
+
+            tube_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant")
+            shell_velocity_status = self.check_velocity_status(v_shell, glycol_percent, "water_glycol")
+
+            v_shell_report = v_shell
+            v_tube_report = v_ref
+            Re_shell_report = Re_shell
+            Re_tube_report = Re_ref_v
+
+            h_shell_for_reporting = h_tube
+
+        # ============================================================
+        # Overall U values (based on tube OD) + Duties/Areas
+        # ============================================================
+
+        # Overall U values: keep original structure. h_tube always means "tube-side water" in shell-refrigerant mode.
+        # In tube-refrigerant mode, h_desuperheat/h_condense/h_subcool are tube-side refrigerant and h_tube variable is shell-side water estimate.
+
+        if refrigerant_side == "shell":
+            U_condense = 1.0 / (
+                1.0 / h_condense +
+                (tube_od / tube_id) * (1.0 / h_tube) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+            U_desuperheat = 1.0 / (
+                1.0 / h_desuperheat +
+                (tube_od / tube_id) * (1.0 / h_tube) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+            U_subcool = 1.0 / (
+                1.0 / h_subcool +
+                (tube_od / tube_id) * (1.0 / h_tube) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+        else:
+            # Tube-side varies by zone, shell-side is h_tube (water on shell)
+            U_condense = 1.0 / (
+                1.0 / h_tube +
+                (tube_od / tube_id) * (1.0 / h_condense) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+            U_desuperheat = 1.0 / (
+                1.0 / h_tube +
+                (tube_od / tube_id) * (1.0 / h_desuperheat) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+            U_subcool = 1.0 / (
+                1.0 / h_tube +
+                (tube_od / tube_id) * (1.0 / h_subcool) +
+                R_wall +
+                R_fouling_shell +
+                (tube_od / tube_id) * R_fouling_tube
+            )
+
         # Total area
         A_total = math.pi * tube_od * tube_length * n_tubes
-        
-        # Heat duties
-        Q_desuperheat_req = m_dot_ref * ref_props["cp_vapor"] * 1000 * (T_ref_in_superheated - T_cond)
-        Q_latent_req = m_dot_ref * ref_props["h_fg"] * 1000
-        Q_subcool_req = m_dot_ref * ref_props["cp_liquid"] * 1000 * subcool_req
-        Q_total_req = Q_desuperheat_req + Q_latent_req + Q_subcool_req
-        
+
+        # Refrigerant duties
+        Q_desuperheat_req = m_dot_ref * (ref_props["cp_vapor"] * 1000.0) * (T_ref_in_superheated - T_cond)
+        Q_latent_req = m_dot_ref * (ref_props["h_fg"] * 1000.0)
         T_subcooled_req = T_cond - subcool_req
-        
-        # Capacity rates
-        C_ref_desuperheat = m_dot_ref * ref_props["cp_vapor"] * 1000
-        C_ref_subcool = m_dot_ref * ref_props["cp_liquid"] * 1000
-        C_water = m_dot_sec_kg * sec_props["cp"]
-        
-        # Simplified area distribution
-        # Typically: 10-15% desuperheat, 70-80% condensing, 10-15% subcool
-        f1_opt, f2_opt, f3_opt = 0.15, 0.7, 0.15
-        
-        A_desuperheat = A_total * f1_opt
-        A_condense = A_total * f2_opt
-        A_subcool = A_total * f3_opt
-        
-        # Desuperheating region
-        T_water_1 = T_sec_in
-        C_min1 = min(C_ref_desuperheat, C_water)
-        C_max1 = max(C_ref_desuperheat, C_water)
-        C_r1 = C_min1 / C_max1 if C_max1 > 0 else 0
-        NTU1 = U_desuperheat * A_desuperheat / C_min1 if C_min1 > 0 else 0
-        epsilon1 = self.epsilon_ntu_counterflow(NTU1, C_r1)
-        Q_max1 = C_min1 * (T_ref_in_superheated - T_water_1)
-        Q1_achieved = epsilon1 * Q_max1
-        T_water_2 = T_water_1 + Q1_achieved / C_water if C_water > 0 else T_water_1
-        
-        # Condensing region
-        NTU2 = U_condense * A_condense / C_water if C_water > 0 else 0
-        epsilon2 = 1 - math.exp(-NTU2)
-        Q_max2 = C_water * (T_cond - T_water_2)
-        Q2_achieved = epsilon2 * Q_max2
-        T_water_3 = T_water_2 + Q2_achieved / C_water if C_water > 0 else T_water_2
-        
-        # Subcooling region
-        C_min3 = min(C_ref_subcool, C_water)
-        C_max3 = max(C_ref_subcool, C_water)
-        C_r3 = C_min3 / C_max3 if C_max3 > 0 else 0
-        NTU3 = U_subcool * A_subcool / C_min3 if C_min3 > 0 else 0
-        epsilon3 = self.epsilon_ntu_counterflow(NTU3, C_r3)
-        Q_max3 = C_min3 * (T_cond - T_water_3)
-        Q3_achieved = epsilon3 * Q_max3
-        T_water_out = T_water_3 + Q3_achieved / C_water if C_water > 0 else T_water_3
-        
-        # Refrigerant outlet temperature
-        T_ref_out = T_cond - Q3_achieved / C_ref_subcool if C_ref_subcool > 0 else T_subcooled_req
-        
+        Q_subcool_req = m_dot_ref * (ref_props["cp_liquid"] * 1000.0) * (T_cond - T_subcooled_req)
+        Q_total_req = Q_desuperheat_req + Q_latent_req + Q_subcool_req
+
+        # Split area (proportional to UA by zone; keep existing approach)
+        UA_total = U_desuperheat + U_condense + U_subcool
+        if UA_total <= 0:
+            UA_total = 1e-9
+
+        A_desuperheat = A_total * (U_desuperheat / UA_total)
+        A_condense = A_total * (U_condense / UA_total)
+        A_subcool = max(A_total - A_desuperheat - A_condense, 0.0)
+
+        # Secondary fluid heat capacity rate
+        C_water = m_dot_sec_kg * sec_props["cp"] if sec_props["cp"] > 0 else 1e-9
+
+        # Achievable heat duties via ε-NTU (counterflow approx) per zone
+        # Zone 1: desuperheat (single-phase vs single-phase)
+        C_ref_superheat = m_dot_ref * (ref_props["cp_vapor"] * 1000.0)
+        C_min_superheat = min(C_water, C_ref_superheat)
+        C_max_superheat = max(C_water, C_ref_superheat)
+        Cr_superheat = C_min_superheat / C_max_superheat if C_max_superheat > 0 else 0.0
+        NTU1 = (U_desuperheat * A_desuperheat) / C_min_superheat if C_min_superheat > 0 else 0.0
+        eps1 = self.epsilon_ntu_counterflow(NTU1, Cr_superheat)
+        Q1_achieved = eps1 * C_min_superheat * (T_ref_in_superheated - T_sec_in)
+
+        # Zone 2: condensation (phase change, C_ref ~ inf) -> Cr ~ 0
+        NTU2 = (U_condense * A_condense) / C_water if C_water > 0 else 0.0
+        eps2 = 1.0 - math.exp(-NTU2) if NTU2 > 0 else 0.0
+        # driving ΔT between condensing temp and secondary fluid in (conservative)
+        Q2_achieved = eps2 * C_water * max(T_cond - T_sec_in, 0.0)
+
+        # Zone 3: subcool (single-phase)
+        C_ref_liquid = m_dot_ref * (ref_props["cp_liquid"] * 1000.0)
+        C_min_sub = min(C_water, C_ref_liquid)
+        C_max_sub = max(C_water, C_ref_liquid)
+        Cr_sub = C_min_sub / C_max_sub if C_max_sub > 0 else 0.0
+        NTU3 = (U_subcool * A_subcool) / C_min_sub if C_min_sub > 0 else 0.0
+        eps3 = self.epsilon_ntu_counterflow(NTU3, Cr_sub)
+        # inlet for subcool zone uses condensing temp; secondary inlet approximated as T_sec_in
+        Q3_achieved = eps3 * C_min_sub * max(T_cond - T_sec_in, 0.0)
+
         Q_total_achieved = Q1_achieved + Q2_achieved + Q3_achieved
-        
-        # Overall effectiveness
-        C_min_overall = C_water
-        Q_max_total = C_min_overall * (T_ref_in_superheated - T_sec_in)
-        epsilon_overall = Q_total_achieved / Q_max_total if Q_max_total > 0 else 0
-        
-        U_avg = (U_desuperheat * A_desuperheat + U_condense * A_condense + U_subcool * A_subcool) / A_total
-        NTU_overall = U_avg * A_total / C_water if C_water > 0 else 0
-        
-        # LMTD
+
+        # Water outlet temperature from achieved duty
+        T_water_out = T_sec_in + (Q_total_achieved / C_water) if C_water > 0 else T_sec_in
+
+        # Refrigerant outlet achieved (subcooling)
+        subcool_achieved = Q3_achieved / max(m_dot_ref * (ref_props["cp_liquid"] * 1000.0), 1e-9)
+        T_ref_out = T_cond - subcool_achieved
+
+        # Overall effectiveness (based on total max)
+        Q_max_total = C_water * max((T_ref_in_superheated - T_sec_in), 0.0)
+        epsilon_overall = Q_total_achieved / Q_max_total if Q_max_total > 0 else 0.0
+
+        U_avg = (U_desuperheat * A_desuperheat + U_condense * A_condense + U_subcool * A_subcool) / max(A_total, 1e-9)
+        NTU_overall = U_avg * A_total / C_water if C_water > 0 else 0.0
+
+        # LMTD (rough, for reporting)
         dt1 = T_ref_in_superheated - T_water_out
         dt2 = T_ref_out - T_sec_in
-        if dt1 > 0 and dt2 > 0 and abs(dt1 - dt2) > 1e-6:
+        if dt1 > 0 and dt2 > 0 and abs(dt1 - dt2) > 1e-9:
             LMTD = (dt1 - dt2) / math.log(dt1 / dt2)
         else:
-            LMTD = (dt1 + dt2) / 2
-        
-        # Pressure drop calculations
-        # Tube-side pressure drop (water)
-        if Re_tube > 2300:
-            f_tube = (0.79 * math.log(Re_tube) - 1.64)**-2 if Re_tube > 0 else 0.02
-        else:
-            f_tube = 64 / Re_tube if Re_tube > 0 else 0.05
-        
-        dp_tube = f_tube * (tube_length * n_passes / tube_id) * (sec_props["rho"] * v_tube**2 / 2)
-        
-        # Shell-side pressure drop (refrigerant vapor)
-        Re_shell = G_ref_shell * D_e / ref_props["mu_vapor"] if ref_props["mu_vapor"] > 0 else 0
-        if Re_shell < 2300:
-            f_shell = 64 / Re_shell if Re_shell > 0 else 0.2
-        else:
-            f_shell = 0.2 * Re_shell**-0.2
-        
-        dp_shell = f_shell * (tube_length / D_e) * (n_baffles + 1) * (ref_props["rho_vapor"] * v_shell**2 / 2)
-        
-        # Velocity status
-        tube_velocity_status = self.check_velocity_status(v_tube, glycol_percent, "tubes")
-        shell_velocity_status = self.check_velocity_status(v_shell, 0, "refrigerant_vapor")
-        
-        # TEMA compliance checks (simplified for brevity)
-        # ... (similar to evaporator but adapted for condenser)
-        
-        # Required area
-        A_required = Q_total_req / (U_avg * LMTD) if U_avg > 0 and LMTD > 0 else 0
-        area_ratio = A_total / A_required if A_required > 0 else 0
-        
+            LMTD = (dt1 + dt2) / 2.0
+
+        # Required area based on average U and total duty
+        A_required = Q_total_req / (max(U_avg, 1e-9) * max(LMTD, 1e-6))
+        area_ratio = A_total / A_required if A_required > 0 else 0.0
+
         design_status = self.determine_design_status(
             epsilon_overall, A_total, A_required, Q_total_achieved, Q_total_req
         )
-        
+
+        # ============================================================
+        # TEMA Compliance Checks (populate keys for report)
+        # ============================================================
+        tube_valid, tube_message = TEMATubeStandards.validate_tube_selection(tube_size, bwg)
+
+        baffle_check = TEMABaffleStandards.validate_baffle_spacing(
+            shell_diameter, baffle_spacing, tube_od, tema_class
+        )
+
+        # Maximum unsupported span (TEMA table-based estimate)
+        T_metal_est = (T_cond + (T_sec_in + T_water_out) / 2.0) / 2.0
+        max_span_m = TEMABaffleStandards.get_maximum_unsupported_span(tube_od, tube_material, T_metal_est)
+        span_compliant = baffle_spacing <= max_span_m
+
+        # Impingement check (use shell-side inlet density/velocity)
+        if refrigerant_side == "shell":
+            impingement_check = TEMABaffleStandards.calculate_impingement_requirement(
+                ref_props["rho_vapor"], v_shell_report, "gases_vapors"
+            )
+        else:
+            impingement_check = TEMABaffleStandards.calculate_impingement_requirement(
+                sec_props["rho"], v_shell_report, "non_abrasive_single_phase"
+            )
+
+        tie_rod_req = TEMABaffleStandards.get_tie_rod_requirements(shell_diameter, tema_class)
+
+        # Tube hole diameter validation (use typical estimate + table check)
+        hole_diameter = tube_od_mm + 0.2
+        hole_check = TEMATubesheetStandards.validate_tube_hole_diameter(
+            tube_od_mm, hole_diameter, "standard"
+        )
+
+        # Minimum tubesheet thickness (simple TEMA-based check)
+        design_pressure_bar = float(inputs.get("design_pressure_bar", inputs.get("design_pressure", 10)))
+        design_pressure_pa = design_pressure_bar * 1e5
+        max_temp = max(T_ref_in_superheated, T_cond, T_sec_in, T_water_out)
+        min_ts_thickness = TEMATubesheetStandards.calculate_min_tubesheet_thickness(
+            shell_diameter, tube_od, tube_pitch, design_pressure_pa, tube_material, max_temp
+        )
+
+        # Vibration analysis (existing module)
+        vibration_inputs = {
+            "shell_diameter_m": shell_diameter,
+            "tube_od_m": tube_od,
+            "tube_pitch_m": tube_pitch,
+            "baffle_spacing_m": baffle_spacing,
+            "tube_length_m": tube_length,
+            "n_tubes": n_tubes,
+            "tube_material": tube_material,
+            "shell_velocity_ms": v_shell_report,
+            "tube_velocity_ms": v_tube_report,
+            "shell_density": (ref_props["rho_vapor"] if refrigerant_side == "shell" else sec_props["rho"]),
+            "tube_density": (sec_props["rho"] if refrigerant_side == "shell" else ref_props["rho_vapor"]),
+        }
+        vibration_results = self.analyze_vibration_tema(vibration_inputs)
+
+        tema_compliant = all([
+            tube_valid,
+            baffle_check["compliant"],
+            span_compliant,
+            (not impingement_check.get("impingement_required", True)) or inputs.get("has_impingement_plate", False),
+            vibration_results.get("tema_compliant", True),
+        ])
+
+        # ============================================================
         # Compile results
+        # ============================================================
         self.results = {
             "heat_exchanger_type": "Condenser",
             "tema_class": tema_class,
-            "tema_type": inputs.get("tema_type", "AES"),
+            "tema_type": tema_type,
+            "condenser_refrigerant_side": refrigerant_side,
             "design_method": "TEMA 10th Edition / ε-NTU",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "heat_duty_required_kw": Q_total_req / 1000,
-            "heat_duty_achieved_kw": Q_total_achieved / 1000,
-            "kw_difference": (Q_total_achieved - Q_total_req) / 1000,
-            "kw_match_percentage": (Q_total_achieved / Q_total_req * 100) if Q_total_req > 0 else 0,
-            "q_desuperheat_req_kw": Q_desuperheat_req / 1000,
-            "q_latent_req_kw": Q_latent_req / 1000,
-            "q_subcool_req_kw": Q_subcool_req / 1000,
-            "q_desuperheat_achieved_kw": Q1_achieved / 1000,
-            "q_latent_achieved_kw": Q2_achieved / 1000,
-            "q_subcool_achieved_kw": Q3_achieved / 1000,
+
+            # Duties
+            "heat_duty_required_kw": Q_total_req / 1000.0,
+            "heat_duty_achieved_kw": Q_total_achieved / 1000.0,
+            "kw_difference": (Q_total_achieved - Q_total_req) / 1000.0,
+            "kw_match_percentage": (Q_total_achieved / Q_total_req * 100.0) if Q_total_req > 0 else 0.0,
+            "q_desuperheat_req_kw": Q_desuperheat_req / 1000.0,
+            "q_latent_req_kw": Q_latent_req / 1000.0,
+            "q_subcool_req_kw": Q_subcool_req / 1000.0,
+            "q_desuperheat_achieved_kw": Q1_achieved / 1000.0,
+            "q_latent_achieved_kw": Q2_achieved / 1000.0,
+            "q_subcool_achieved_kw": Q3_achieved / 1000.0,
+
+            # Performance
             "effectiveness": epsilon_overall,
             "ntu": NTU_overall,
             "overall_u": U_avg,
@@ -1932,6 +2170,8 @@ class TEMACompliantDXHeatExchangerDesign:
             "h_desuperheat": h_desuperheat,
             "h_subcool": h_subcool,
             "lmtd": LMTD,
+
+            # Temperatures
             "t_sec_in": T_sec_in,
             "t_sec_out": T_water_out,
             "t_ref_in_superheated": T_ref_in_superheated,
@@ -1942,21 +2182,25 @@ class TEMACompliantDXHeatExchangerDesign:
             "water_deltaT": abs(T_water_out - T_sec_in),
             "subcool_req": subcool_req,
             "subcool_achieved": T_cond - T_ref_out,
+
+            # Fluids
             "refrigerant": refrigerant,
             "refrigerant_mass_flow_kg_s": m_dot_ref,
-            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600,
-            "water_vol_flow_L_hr": m_dot_sec_L * 3600,
-            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600,
+            "refrigerant_mass_flow_kg_hr": m_dot_ref * 3600.0,
+            "water_vol_flow_L_hr": m_dot_sec_L * 3600.0,
+            "water_mass_flow_kg_hr": m_dot_sec_kg * 3600.0,
             "glycol_type": glycol_type,
             "glycol_percentage": glycol_percent,
+
+            # Geometry
             "tube_size": tube_size,
             "bwg": bwg,
             "tube_material": tube_material,
-            "tube_od_mm": tube_od * 1000,
-            "tube_id_mm": tube_id * 1000,
-            "tube_thickness_mm": tube_thickness * 1000,
-            "tube_pitch_mm": tube_pitch * 1000,
-            "pitch_ratio": tube_pitch / tube_od,
+            "tube_od_mm": tube_od * 1000.0,
+            "tube_id_mm": tube_id * 1000.0,
+            "tube_thickness_mm": tube_thickness * 1000.0,
+            "tube_pitch_mm": tube_pitch * 1000.0,
+            "pitch_ratio": tube_pitch / tube_od if tube_od > 0 else 0.0,
             "tube_layout": tube_layout,
             "n_tubes": n_tubes,
             "n_passes": n_passes,
@@ -1964,29 +2208,49 @@ class TEMACompliantDXHeatExchangerDesign:
             "shell_diameter_m": shell_diameter,
             "shell_flow_area_m2": shell_flow_area,
             "baffle_spacing_m": baffle_spacing,
-            "baffle_cut_percent": baffle_cut * 100,
+            "baffle_cut_percent": baffle_cut * 100.0,
             "n_baffles": n_baffles,
+
+            # Areas
             "area_total_m2": A_total,
             "area_desuperheat_m2": A_desuperheat,
             "area_condense_m2": A_condense,
             "area_subcool_m2": A_subcool,
             "area_required_m2": A_required,
             "area_ratio": area_ratio,
-            "velocity_tube_ms": v_tube,
-            "velocity_shell_ms": v_shell,
+
+            # Velocities & DP
+            "velocity_tube_ms": v_tube_report,
+            "velocity_shell_ms": v_shell_report,
             "velocity_tube_status": tube_velocity_status["status"],
             "velocity_shell_status": shell_velocity_status["status"],
-            "dp_tube_kpa": dp_tube / 1000,
-            "dp_shell_kpa": dp_shell / 1000,
-            "reynolds_tube": Re_tube,
-            "reynolds_shell": Re_shell,
+            "dp_tube_kpa": dp_tube / 1000.0,
+            "dp_shell_kpa": dp_shell / 1000.0,
+            "reynolds_tube": Re_tube_report,
+            "reynolds_shell": Re_shell_report,
+
+            # TEMA Compliance (keys used by report)
+            "tema_tube_compliant": tube_valid,
+            "tema_tube_message": tube_message,
+            "tema_baffle_compliant": baffle_check["compliant"],
+            "tema_baffle_warnings": baffle_check["warnings"],
+            "tema_span_compliant": span_compliant,
+            "tema_max_span_m": max_span_m,
+            "tema_impingement": impingement_check,
+            "tema_tie_rod": tie_rod_req,
+            "tema_hole_check": hole_check,
+            "tema_min_ts_thickness_mm": min_ts_thickness,
+            "tema_vibration": vibration_results,
+            "tema_overall_compliant": tema_compliant,
+
+            # Status
             "design_status": design_status,
             "warnings": self.warnings,
         }
-        
+
         return self.results
-    
-    # ========================================================================
+
+# ========================================================================
     # UTILITY METHODS
     # ========================================================================
     
@@ -2306,7 +2570,7 @@ class PDFReportGenerator:
         story.append(Paragraph("4.2 Tube Side", self.subheading_style))
         tube_data = [
             ["Parameter", "Value", "Unit"],
-            ["Tube Size", f"{results.get('tube_size', '3/4\"')}", ""],
+            ["Tube Size", f"{results.get('tube_size', '3/4 in')}", ""],
             ["BWG Gauge", f"{results.get('bwg', '18')}", ""],
             ["Tube Material", f"{results.get('tube_material', 'Copper')}", ""],
             ["Tube OD", f"{results.get('tube_od_mm', 19.05):.2f}", "mm"],
@@ -2574,7 +2838,19 @@ def create_input_section():
     if inputs["hex_type"] == "DX Evaporator":
         st.sidebar.markdown('<span class="dx-badge">DX Type - Refrigerant in Tubes</span>', unsafe_allow_html=True)
     else:
-        st.sidebar.markdown('<span class="condenser-badge">Condenser - Refrigerant on Shell</span>', unsafe_allow_html=True)
+        # Condenser configuration selector
+        cond_side_label = st.sidebar.radio(
+            "Condenser: Refrigerant location",
+            ["Shell side (recommended)", "Tube side (optional)"],
+            help="Most water-cooled condensers put water/glycol in tubes for cleaning. "
+                 "Some designs condense refrigerant inside tubes instead."
+        )
+        inputs["condenser_refrigerant_side"] = "shell" if cond_side_label.startswith("Shell") else "tube"
+
+        if inputs["condenser_refrigerant_side"] == "shell":
+            st.sidebar.markdown('<span class="condenser-badge">Condenser - Refrigerant on Shell</span>', unsafe_allow_html=True)
+        else:
+            st.sidebar.markdown('<span class="condenser-badge">Condenser - Refrigerant in Tubes</span>', unsafe_allow_html=True)
     
     st.sidebar.markdown("---")
     
@@ -2766,6 +3042,30 @@ def create_input_section():
         st.sidebar.warning(f"⚠️ Pitch ratio {pitch_ratio:.2f} - TEMA minimum is 1.25")
     else:
         st.sidebar.success(f"✓ TEMA compliant: Pitch ratio = {pitch_ratio:.2f}")
+
+
+    # --- TEMA pitch guidance helper (UI assist; does not block calculation) ---
+    # Practical industry/TEMA guidance: triangular layouts can use tighter pitch (>=1.25*OD),
+    # while mechanical cleaning (typically square pitch) usually needs wider lanes (often ~1.5*OD or more).
+    tema_pitch_min_ratio = 1.25  # hard minimum check already applied
+    tema_pitch_reco_ratio = 1.50 if inputs.get("mechanical_cleaning", False) else 1.25
+    tema_pitch_reco_note = (
+        "Mechanical cleaning selected → typical guidance is to use **square pitch** and a wider pitch "
+        "(often around **1.5×OD** or higher) to allow cleaning lanes and reduce tube-to-tube obstruction."
+        if inputs.get("mechanical_cleaning", False)
+        else
+        "No mechanical cleaning selected → typical guidance allows tighter pitch. "
+        "Triangular layouts often use **1.25×OD to ~1.33×OD** for compact bundles."
+    )
+    st.sidebar.info(
+        f"📌 **Pitch guidance (TEMA/industry practice):** recommended ≥ **{tema_pitch_reco_ratio:.2f}×OD**.  "
+        f"Your selection: **{pitch_ratio:.2f}×OD**.\n\n{tema_pitch_reco_note}"
+    )
+    if inputs.get("mechanical_cleaning", False) and pitch_ratio < tema_pitch_reco_ratio:
+        st.sidebar.warning(
+            f"🧽 Cleaning-friendly pitch usually needs ≥ {tema_pitch_reco_ratio:.2f}×OD. "
+            "Consider increasing tube pitch (or switching to Square layout)."
+        )
     
     inputs["n_passes"] = st.sidebar.selectbox("Tube Passes", [1, 2, 4, 6], index=1)
     
@@ -2801,6 +3101,98 @@ def create_input_section():
         help="Triangular: Higher heat transfer\nSquare: Easier cleaning"
     )
     
+    
+
+    # --------------------------------------------------------------
+    # 📏 Live TEMA guidance (shown BEFORE calculation)
+    # --------------------------------------------------------------
+    try:
+        # Basic geometry (user-selected)
+        tube_od_m = tube_od_mm / 1000.0
+        tube_pitch_m = inputs["tube_pitch"] / 1000.0
+        tube_length_m = float(inputs.get("tube_length", 3.0))
+        n_baffles = int(inputs.get("n_baffles", 5))
+        n_tubes = int(inputs.get("n_tubes", 100))
+
+        # Layout mapping for internal functions
+        _layout_map = {
+            "Triangular": "triangular",
+            "Square": "square",
+            "Rotated Square": "rotated square"
+        }
+        layout_key = _layout_map.get(inputs.get("tube_layout", "Triangular"), "triangular")
+
+        # Estimate shell ID from your existing (simple) bundle fit method
+        shell_id_est_m = designer.calculate_shell_diameter(
+            tube_od=tube_od_m,
+            n_tubes=n_tubes,
+            pitch=tube_pitch_m,
+            tube_layout=layout_key
+        )
+
+        # Derived baffle spacing from tube length and number of baffles
+        baffle_spacing_m = tube_length_m / (n_baffles + 1)
+
+        # TEMA minimum baffle spacing (RCB-4.5.1)
+        baffle_check_ui = TEMABaffleStandards.validate_baffle_spacing(
+            shell_id_m=shell_id_est_m,
+            baffle_spacing_m=baffle_spacing_m,
+            tube_od_m=tube_od_m,
+            tema_class=inputs.get("tema_class", "R")
+        )
+
+        # TEMA maximum unsupported tube span (RCB-4.5.2) - temperature estimate
+        # Note: before full thermal calc, we estimate metal temp conservatively.
+        if inputs["hex_type"] == "Condenser":
+            T_metal_est_c = (float(inputs.get("T_ref", 45.0)) + float(inputs.get("T_sec_in", 30.0))) / 2.0
+        else:
+            T_metal_est_c = (float(inputs.get("T_ref", 5.0)) + float(inputs.get("T_sec_in", 12.0))) / 2.0
+
+        max_span_m_ui = TEMABaffleStandards.get_maximum_unsupported_span(
+            tube_od_m=tube_od_m,
+            tube_material=inputs.get("tube_material", "Copper"),
+            T_metal_c=T_metal_est_c
+        )
+
+        # In a segmental-baffle exchanger, interior unsupported span ~ baffle spacing
+        unsupported_span_m_ui = baffle_spacing_m
+
+        # Display to the user right under tube/baffle inputs
+        st.sidebar.markdown("#### 📏 TEMA Guidance (live)")
+        st.sidebar.caption(
+            "These checks update as you change inputs. "
+            "Shell ID is an estimate for spacing guidance; final values are confirmed after calculation."
+        )
+
+        g1, g2 = st.sidebar.columns(2)
+        g1.metric("Est. Shell ID", f"{shell_id_est_m*1000:.0f} mm")
+        g2.metric("Baffle Spacing", f"{baffle_spacing_m*1000:.0f} mm")
+
+        # Baffle spacing vs minimum
+        min_spacing_mm = baffle_check_ui["minimum_spacing_m"] * 1000.0
+        margin_mm = (baffle_spacing_m - baffle_check_ui["minimum_spacing_m"]) * 1000.0
+
+        if baffle_check_ui["compliant"]:
+            st.sidebar.success(f"✓ Baffle spacing ≥ TEMA minimum ({min_spacing_mm:.0f} mm). Margin: +{margin_mm:.0f} mm")
+        else:
+            st.sidebar.error(f"❌ Baffle spacing below TEMA minimum ({min_spacing_mm:.0f} mm). Short by {abs(margin_mm):.0f} mm")
+
+        # Unsupported span vs maximum
+        max_span_mm = max_span_m_ui * 1000.0
+        span_margin_mm = (max_span_m_ui - unsupported_span_m_ui) * 1000.0
+
+        if unsupported_span_m_ui <= max_span_m_ui:
+            st.sidebar.success(f"✓ Unsupported span ≤ TEMA max ({max_span_mm:.0f} mm). Margin: +{span_margin_mm:.0f} mm")
+        else:
+            st.sidebar.error(f"❌ Unsupported span exceeds TEMA max ({max_span_mm:.0f} mm). Exceeds by {abs(span_margin_mm):.0f} mm")
+
+        st.sidebar.caption(
+            f"Metal temperature used for span estimate: ~{T_metal_est_c:.1f}°C (pre-calc estimate)."
+        )
+
+    except Exception as _e:
+        # Never block the UI on guidance calculations
+        st.sidebar.caption("TEMA guidance preview unavailable for current inputs.")
     inputs["baffle_thickness_mm"] = number_input_with_buttons(
         label="Baffle Thickness (mm)",
         min_value=3.0, max_value=25.0, value=9.5, step=1.0,
@@ -3241,7 +3633,7 @@ def main():
     **✅ TEMA 10th Edition Compliant Design Tool**
     
     - **DX Evaporator**: Refrigerant in TUBES, Water/Glycol on SHELL ✓
-    - **Condenser**: Refrigerant on SHELL, Water/Glycol in TUBES ✓
+    - **Condenser**: Refrigerant on shell (default) or in tubes (optional) ✓
     - TEMA Class R, C, B compliant
     - Section 6 Vibration Analysis
     - Table D-7 Tube Standards
