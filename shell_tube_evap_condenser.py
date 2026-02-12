@@ -3643,16 +3643,16 @@ def display_results(results: Dict, inputs: Dict):
     """, unsafe_allow_html=True)
     
     # Quick guidance
-if results.get("design_status_reasons") or results.get("design_guidance"):
-    st.markdown("### ✅ Design Checks & Guidance")
-    reasons = results.get("design_status_reasons", {}) or {}
-    if reasons:
-        st.write("**Status reasons:** " + " | ".join([f"{k}: {v}" for k, v in reasons.items()]))
-    guidance = results.get("design_guidance", []) or []
-    for g in guidance[:8]:
-        st.write(f"• {g}")
-    if len(guidance) > 8:
-        st.caption(f"(+{len(guidance)-8} more suggestions in PDF report)")
+    if results.get("design_status_reasons") or results.get("design_guidance"):
+        st.markdown("### ✅ Design Checks & Guidance")
+        reasons = results.get("design_status_reasons", {}) or {}
+        if reasons:
+            st.write("**Status reasons:** " + " | ".join([f"{k}: {v}" for k, v in reasons.items()]))
+        guidance = results.get("design_guidance", []) or []
+        for g in guidance[:8]:
+            st.write(f"• {g}")
+        if len(guidance) > 8:
+            st.caption(f"(+{len(guidance)-8} more suggestions in PDF report)")
     st.markdown("---")
 
     # TEMA Compliance section
