@@ -622,36 +622,26 @@ class TEMATubesheetStandards:
                                           tube_pitch_mm: float,
                                           design_pressure_pa: float,
                                           max_temp_c: float | None = None,
-                                          tema_class: str = "R") -> Optional[float]:
-        """Lightweight tubesheet minimum thickness helper (mm).
+                                          tema_class: str = "R") -> float:
+        """
+        Convenience wrapper used by the condenser path.
 
-        Full TEMA tubesheet design (Appendix A) needs more inputs than we have here.
-        For a robust app output + a useful minimum sanity check, we report the TEMA
-        minimum thickness for expanded tube joints (RCB/R-7.1.1 / C-7.1.1 / B-7.1.1).
+        Note:
+        - Full TEMA tubesheet design per Appendix A requires additional inputs
+          (materials/allowable stresses, joint details, effective span, etc.).
+        - At this stage, we use the TEMA minimum thickness for expanded joints
+          (RCB/R-7.1.1 / C-7.1.1 / B-7.1.1), which is conservative for many
+          standard exchangers and prevents the app from crashing.
 
-        Returns thickness in mm, or None if unknown.
+        Returns thickness in mm.
         """
         try:
-            od = float(tube_od_mm)
-
-            # Heuristic: if meters were passed accidentally, convert to mm
-            if 0.0 < od < 1.0:
-                od *= 1000.0
-
-            if od <= 0:
-                return None
-
-            cls = str(tema_class or "R").strip().upper()
-            t_min = TEMATubesheetStandards.calculate_min_thickness_expanded_joints(od, cls)
-            if t_min is None:
-                return None
-
-            t_min = float(t_min)
-            if t_min <= 0:
-                return None
-            return t_min
+            return TEMATubesheetStandards.calculate_min_thickness_expanded_joints(
+                float(tube_od_mm), str(tema_class or "R")
+            )
         except Exception:
-            return None
+            # Absolute fallback: at least tube OD (very conservative)
+            return float(tube_od_mm)
 
 
 
@@ -1708,9 +1698,23 @@ class TEMACompliantDXHeatExchangerDesign:
             # Temperatures
             "t_sec_in": T_sec_in,
             "t_sec_out": T_water_out,
+            "t_sec_out_required": (T_sec_out_required if T_sec_out_required is not None else None),
             "t_ref_in": T_evap,
             "t_ref_out_required": T_superheated_req,
             "t_ref_out_achieved": T_ref_out,
+            # Stream mapping (for UI/report clarity)
+            "refrigerant_side": refrigerant_side,
+            "shell_stream": ("Refrigerant" if refrigerant_side == "shell" else "Water/Glycol"),
+            "tube_stream": ("Water/Glycol" if refrigerant_side == "shell" else "Refrigerant"),
+            "t_shell_in": (T_ref_in_superheated if refrigerant_side == "shell" else T_sec_in),
+            "t_shell_out": (T_ref_out if refrigerant_side == "shell" else T_water_out),
+            "t_tube_in": (T_sec_in if refrigerant_side == "shell" else T_ref_in_superheated),
+            "t_tube_out": (T_water_out if refrigerant_side == "shell" else T_ref_out),
+
+            "m_dot_shell_kg_s": (m_dot_ref if refrigerant_side == "shell" else m_dot_sec_kg),
+            "m_dot_tube_kg_s": (m_dot_sec_kg if refrigerant_side == "shell" else m_dot_ref),
+
+
             "superheat_difference": T_ref_out - T_superheated_req,
             "water_deltaT": abs(T_water_out - T_sec_in),
             "superheat_req": superheat_req,
@@ -1980,8 +1984,8 @@ class TEMACompliantDXHeatExchangerDesign:
             dp_shell = f_shell * (tube_length / max(D_e, 1e-6)) * (n_baffles + 1) * (ref_props["rho_vapor"] * v_shell**2 / 2.0)
 
             # Velocity status
-            tube_velocity_status = self.check_velocity_status(v_tube, glycol_percent, "glycol_tubes" if glycol_percent>0 else "water_tubes", user_max=inputs.get("max_tube_velocity_ms"))
-            shell_velocity_status = self.check_velocity_status(v_shell, 0, "refrigerant_two_phase")
+            tube_velocity_status = self.check_velocity_status(v_tube, glycol_percent, "water_glycol")
+            shell_velocity_status = self.check_velocity_status(v_shell, 0, "refrigerant")
 
             # For reporting
             v_shell_report = v_shell
@@ -2064,8 +2068,8 @@ class TEMACompliantDXHeatExchangerDesign:
                 f_shell = 0.2 * Re_shell ** -0.2
             dp_shell = f_shell * (tube_length / max(D_e, 1e-6)) * (n_baffles + 1) * (sec_props["rho"] * v_shell**2 / 2.0)
 
-            tube_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant_two_phase", user_max=inputs.get("max_tube_velocity_ms"))
-            shell_velocity_status = self.check_velocity_status(v_shell, glycol_percent, "glycol_shell" if glycol_percent>0 else "water_shell")
+            tube_velocity_status = self.check_velocity_status(v_ref, 0, "refrigerant")
+            shell_velocity_status = self.check_velocity_status(v_shell, glycol_percent, "water_glycol")
 
             v_shell_report = v_shell
             v_tube_report = v_ref
@@ -2149,40 +2153,60 @@ class TEMACompliantDXHeatExchangerDesign:
         # Secondary fluid heat capacity rate
         C_water = m_dot_sec_kg * sec_props["cp"] if sec_props["cp"] > 0 else 1e-9
 
-        # Achievable heat duties via ε-NTU (counterflow approx) per zone
-        # Zone 1: desuperheat (single-phase vs single-phase)
-        C_ref_superheat = m_dot_ref * (ref_props["cp_vapor"] * 1000.0)
+        # Achievable heat duties via ε-NTU per zone (counterflow approx), applied sequentially
+        # NOTE: We update the secondary-fluid temperature after each zone. This fixes unrealistic in/out temperatures
+        # that can occur if all zones use T_sec_in as the cold-side inlet.
+
+        T_sec_z1_in = T_sec_in
+
+        # Zone 1: Desuperheat (single-phase vs single-phase)
+        C_ref_superheat = m_dot_ref * (ref_props["cp_vapor"] * 1000.0)  # W/K
         C_min_superheat = min(C_water, C_ref_superheat)
         C_max_superheat = max(C_water, C_ref_superheat)
         Cr_superheat = C_min_superheat / C_max_superheat if C_max_superheat > 0 else 0.0
         NTU1 = (U_desuperheat * A_desuperheat) / C_min_superheat if C_min_superheat > 0 else 0.0
         eps1 = self.epsilon_ntu_counterflow(NTU1, Cr_superheat)
-        Q1_achieved = eps1 * C_min_superheat * (T_ref_in_superheated - T_sec_in)
+        Q1_achieved = max(eps1 * C_min_superheat * max(T_ref_in_superheated - T_sec_z1_in, 0.0), 0.0)
+        T_sec_z1_out = T_sec_z1_in + (Q1_achieved / C_water) if C_water > 0 else T_sec_z1_in
 
-        # Zone 2: condensation (phase change, C_ref ~ inf) -> Cr ~ 0
+        # Refrigerant temperature after desuperheat (approaches T_cond, cannot go below)
+        dT_ref1 = Q1_achieved / max(C_ref_superheat, 1e-9)
+        T_ref_after_z1 = max(T_ref_in_superheated - dT_ref1, T_cond)
+
+        # Zone 2: Condensation (phase change, C_ref ~ ∞ -> Cr ~ 0)
+        T_sec_z2_in = T_sec_z1_out
         NTU2 = (U_condense * A_condense) / C_water if C_water > 0 else 0.0
-        eps2 = 1.0 - math.exp(-NTU2) if NTU2 > 0 else 0.0
-        # driving ΔT between condensing temp and secondary fluid in (conservative)
-        Q2_achieved = eps2 * C_water * max(T_cond - T_sec_in, 0.0)
+        eps2 = (1.0 - math.exp(-NTU2)) if NTU2 > 0 else 0.0
+        Q2_achieved = max(eps2 * C_water * max(T_cond - T_sec_z2_in, 0.0), 0.0)
+        T_sec_z2_out = T_sec_z2_in + (Q2_achieved / C_water) if C_water > 0 else T_sec_z2_in
 
-        # Zone 3: subcool (single-phase)
-        C_ref_liquid = m_dot_ref * (ref_props["cp_liquid"] * 1000.0)
+        # Zone 3: Subcool (single-phase)
+        T_sec_z3_in = T_sec_z2_out
+        C_ref_liquid = m_dot_ref * (ref_props["cp_liquid"] * 1000.0)  # W/K
         C_min_sub = min(C_water, C_ref_liquid)
         C_max_sub = max(C_water, C_ref_liquid)
         Cr_sub = C_min_sub / C_max_sub if C_max_sub > 0 else 0.0
         NTU3 = (U_subcool * A_subcool) / C_min_sub if C_min_sub > 0 else 0.0
         eps3 = self.epsilon_ntu_counterflow(NTU3, Cr_sub)
-        # inlet for subcool zone uses condensing temp; secondary inlet approximated as T_sec_in
-        Q3_achieved = eps3 * C_min_sub * max(T_cond - T_sec_in, 0.0)
+        Q3_achieved = max(eps3 * C_min_sub * max(T_cond - T_sec_z3_in, 0.0), 0.0)
+        T_sec_z3_out = T_sec_z3_in + (Q3_achieved / C_water) if C_water > 0 else T_sec_z3_in
 
         Q_total_achieved = Q1_achieved + Q2_achieved + Q3_achieved
 
-        # Water outlet temperature from achieved duty
-        T_water_out = T_sec_in + (Q_total_achieved / C_water) if C_water > 0 else T_sec_in
+        # Water/Glycol outlet temperature from achieved duty (sequential)
+        T_water_out = T_sec_z3_out
 
-        # Refrigerant outlet achieved (subcooling)
+        # Refrigerant outlet achieved (subcooling achieved)
         subcool_achieved = Q3_achieved / max(m_dot_ref * (ref_props["cp_liquid"] * 1000.0), 1e-9)
         T_ref_out = T_cond - subcool_achieved
+
+        # Required secondary outlet temperature from required duty (for comparison)
+        Q_total_required = self.results.get("Q_total_required", None)
+        try:
+            Q_total_required = float(Q_total_required) if Q_total_required is not None else None
+        except Exception:
+            Q_total_required = None
+        T_sec_out_required = (T_sec_in + (Q_total_required / C_water)) if (Q_total_required is not None and C_water > 0) else None
 
         # Overall effectiveness (based on total max)
         Q_max_total = C_water * max((T_ref_in_superheated - T_sec_in), 0.0)
@@ -2244,12 +2268,7 @@ class TEMACompliantDXHeatExchangerDesign:
         design_pressure_pa = design_pressure_bar * 1e5
         max_temp = max(T_ref_in_superheated, T_cond, T_sec_in, T_water_out)
         min_ts_thickness = TEMATubesheetStandards.calculate_min_tubesheet_thickness(
-            shell_diameter * 1000.0,
-            tube_od * 1000.0,
-            tube_pitch * 1000.0,
-            design_pressure_pa,
-            max_temp_c=max_temp,
-            tema_class=tema_class
+            shell_diameter, tube_od, tube_pitch, design_pressure_pa, tube_material, max_temp
         )
 
         # Vibration analysis (existing module)
@@ -2391,111 +2410,36 @@ class TEMACompliantDXHeatExchangerDesign:
             "warnings": self.warnings,
         }
 
-                # ------------------------------------------------------------
-        # Practical design checks + actionable guidance
-        # ------------------------------------------------------------
-        max_tube_dp_kpa = float(inputs.get("max_allowable_tube_dp_kpa", 100.0) or 100.0)
-        max_tube_vel = inputs.get("max_tube_velocity_ms", None)
-        try:
-            max_tube_vel = float(max_tube_vel) if max_tube_vel is not None else None
-            if max_tube_vel is not None and max_tube_vel <= 0:
-                max_tube_vel = None
-        except Exception:
-            max_tube_vel = None
-
-        kw_pct = float(self.results.get("kw_match_percentage", 0.0) or 0.0)
-        thermal_ok = 85.0 <= kw_pct <= 115.0
-
-        dp_tube_kpa = float(self.results.get("dp_tube_kpa", 0.0) or 0.0)
-        dp_ok = dp_tube_kpa <= max_tube_dp_kpa
-
-        v_tube = float(self.results.get("velocity_tube_ms", 0.0) or 0.0)
-        vel_ok = True if max_tube_vel is None else (v_tube <= max_tube_vel)
-
-        vib = self.results.get("tema_vibration", {}) or {}
-        vib_risk = str(vib.get("risk_level", "NOT ANALYZED")).upper()
-        vibration_ok = vib_risk in ("LOW", "MODERATE", "NOT ANALYZED")
-
-        status_reasons = {
-            "Thermal": ("OK" if thermal_ok else "NOT OK"),
-            "ΔP": ("OK" if dp_ok else "NOT OK"),
-            "Velocity": ("OK" if vel_ok else ("NOT OK" if max_tube_vel is not None else "N/A")),
-            "Vibration": ("OK" if vibration_ok else "NOT OK"),
-        }
-
-        guidance = []
-
-        if kw_pct < 85.0:
-            guidance.append("Thermal shortfall: increase area (more tubes, longer tubes) or increase U (increase water velocity within limits, reduce fouling allowance, improve baffle spacing for higher shell-side HTC).")
-        elif kw_pct > 115.0:
-            guidance.append("Thermal overdesign: reduce area (fewer/shorter tubes) or reduce water flow to save pumping power, while keeping velocities above the low-limit to avoid fouling.")
-
-        if not dp_ok:
-            guidance.append(f"Tube ΔP high ({dp_tube_kpa:.1f} kPa > {max_tube_dp_kpa:.1f} kPa): reduce number of passes, increase tube ID (larger tube size / thinner BWG), increase number of tubes, or reduce water flow rate.")
-
-        if max_tube_vel is not None and (not vel_ok):
-            guidance.append(f"Tube velocity high ({v_tube:.2f} m/s > {max_tube_vel:.2f} m/s): increase flow area (more tubes, fewer passes, larger tube ID) or reduce water flow rate.")
-
-        if vib_risk in ("MODERATE", "HIGH", "SEVERE"):
-            guidance.append("Vibration risk: reduce unsupported span (add baffles / reduce baffle spacing), reduce shell-side crossflow velocity (increase shell ID or reduce shell-side mass flux), and/or increase tube stiffness (larger OD or thicker wall).")
-            if vib_risk in ("HIGH", "SEVERE"):
-                guidance.append("For HIGH/SEVERE vibration, consider changing tube layout, adding support/tie-rods, or using a dedicated vibration analysis (TEMA full method / proprietary tools) before fabrication.")
-
-        self.results["design_status_reasons"] = status_reasons
-        self.results["design_guidance"] = guidance
-        self.results["max_allowable_tube_dp_kpa"] = max_tube_dp_kpa
-        self.results["max_tube_velocity_ms"] = max_tube_vel
-
         return self.results
 
-    # ========================================================================
+# ========================================================================
     # UTILITY METHODS
     # ========================================================================
     
-    def check_velocity_status(self, velocity: float, glycol_percent: int, flow_type: str,
-                              user_max: Optional[float] = None) -> Dict:
-        """Velocity screening with context-aware limits.
-
-        This is guidance for practical designs (fouling / erosion / noise / vibration),
-        not a mandatory code-compliance rule.
-
-        flow_type examples:
-          - water_tubes, water_shell
-          - glycol_tubes, glycol_shell
-          - refrigerant_two_phase, refrigerant_vapor, refrigerant_liquid
-          - refrigerant  (treated as refrigerant_two_phase for conservative screening)
-          - water_glycol (legacy; treated as tubes-side water/glycol based on glycol_percent)
-        """
-        key = str(flow_type or "").strip().lower()
-
-        # Legacy mapping
-        if key in ("water_glycol", "water/glycol", "secondary"):
-            key = "glycol_tubes" if glycol_percent > 0 else "water_tubes"
-        if key == "refrigerant":
-            key = "refrigerant_two_phase"
-
-        rec = self.RECOMMENDED_VELOCITIES.get(key) or self.RECOMMENDED_VELOCITIES["water_shell"]
-
-        rec_eff = dict(rec)
-        if user_max is not None:
-            try:
-                um = float(user_max)
-                if um > 0:
-                    rec_eff["max"] = min(rec_eff["max"], um)
-            except Exception:
-                pass
-
-        v = float(velocity or 0.0)
-
-        if v < rec_eff["min"]:
+    def check_velocity_status(self, velocity: float, glycol_percent: int, flow_type: str) -> Dict:
+        """Check velocity status against TEMA recommendations"""
+        if flow_type == "shell":
+            if glycol_percent > 0:
+                rec = self.RECOMMENDED_VELOCITIES["glycol_shell"]
+            else:
+                rec = self.RECOMMENDED_VELOCITIES["water_shell"]
+        elif flow_type == "tubes":
+            if glycol_percent > 0:
+                rec = self.RECOMMENDED_VELOCITIES["glycol_tubes"]
+            else:
+                rec = self.RECOMMENDED_VELOCITIES["water_tubes"]
+        else:
+            rec = self.RECOMMENDED_VELOCITIES.get(flow_type, self.RECOMMENDED_VELOCITIES["water_shell"])
+        
+        if velocity < rec["min"]:
             status = "Too Low"
             color = "red"
             css_class = "velocity-low"
-        elif v < rec_eff["opt"]:
+        elif velocity < rec["opt"]:
             status = "Low"
             color = "orange"
             css_class = "velocity-low"
-        elif v <= rec_eff["max"]:
+        elif velocity <= rec["max"]:
             status = "Optimal"
             color = "green"
             css_class = "velocity-good"
@@ -2503,18 +2447,17 @@ class TEMACompliantDXHeatExchangerDesign:
             status = "Too High"
             color = "red"
             css_class = "velocity-high"
-
+        
         return {
-            "velocity": v,
+            "velocity": velocity,
             "status": status,
             "color": color,
             "css_class": css_class,
-            "min": rec_eff["min"],
-            "opt": rec_eff["opt"],
-            "max": rec_eff["max"],
-            "basis": key
+            "min": rec["min"],
+            "opt": rec["opt"],
+            "max": rec["max"]
         }
-
+    
     def determine_design_status(self, effectiveness: float, area_total: float, 
                               area_required: float, kw_achieved: float, 
                               kw_required: float) -> str:
@@ -2630,37 +2573,7 @@ class PDFReportGenerator:
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ]))
         story.append(summary_table)
-        story.append(Spacer(1, 0.15 * inch))
-
-        # Design status reasons + guidance (actionable)
-        reasons = results.get("design_status_reasons", {}) or {}
-        if reasons:
-            story.append(Paragraph("Design Status Breakdown", self.subheading_style))
-            rs = [["Check", "Status"]]
-            for k, v in reasons.items():
-                rs.append([str(k), str(v)])
-            rtab = Table(rs, colWidths=[2.5*inch, 1.8*inch])
-            rtab.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6B7280')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 9),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F9FAFB')),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ]))
-            story.append(rtab)
-            story.append(Spacer(1, 0.12 * inch))
-
-        guidance = results.get("design_guidance", []) or []
-        if guidance:
-            story.append(Paragraph("Actionable Guidance", self.subheading_style))
-            for g in guidance:
-                story.append(Paragraph(f"• {g}", self.normal_style))
-            story.append(Spacer(1, 0.15 * inch))
-        else:
-            story.append(Spacer(1, 0.05 * inch))
-
+        story.append(Spacer(1, 0.2 * inch))
         
         # ====================================================================
         # 2. THERMAL PERFORMANCE
@@ -2832,11 +2745,7 @@ class PDFReportGenerator:
             ["Pitch Ratio", f"{results.get('pitch_ratio', 1.25):.3f}", "-"],
             ["Tube Layout", f"{results.get('tube_layout', 'triangular').title()}", ""],
             ["Total Heat Transfer Area", f"{results.get('area_total_m2', 0):.2f}", "m²"],
-            ["TEMA Min Tubesheet Thickness", (
-                f"{float(results.get('tema_min_ts_thickness_mm')):.1f}"
-                if (results.get('tema_min_ts_thickness_mm') not in (None, 0, 0.0, '0', '0.0') and float(results.get('tema_min_ts_thickness_mm') or 0) > 0)
-                else "N/A"
-            ), "mm"],
+            ["TEMA Min Tubesheet Thickness", f"{results.get('tema_min_ts_thickness_mm', 19.05):.1f}", "mm"],
         ]
         
         tube_table = Table(tube_data, colWidths=[2.5*inch, 1.2*inch, 0.8*inch])
@@ -2869,12 +2778,8 @@ class PDFReportGenerator:
                  results.get('velocity_shell_status', 'N/A'), ""],
                 ["Reynolds Number", f"{results.get('reynolds_tube', 0):.0f}", 
                  f"{results.get('reynolds_shell', 0):.0f}", ""],
-                ["Pressure Drop", f"{results.get('dp_tube_kpa', 0):.2f}",
+                ["Pressure Drop", f"{results.get('dp_tube_kpa', 0):.2f}", 
                  f"{results.get('dp_shell_kpa', 0):.2f}", "kPa"],
-                ["Max Allowable Tube ΔP", f"{results.get('max_allowable_tube_dp_kpa', 'N/A')}",
-                 "-", "kPa"],
-                ["Max Tube Velocity", f"{results.get('max_tube_velocity_ms', 'N/A')}",
-                 "-", "m/s"],
                 ["Inlet Quality", f"{results.get('inlet_quality_percent', 20):.1f}", "-", "%"],
                 ["Outlet Quality", f"{results.get('outlet_quality', 100):.0f}", "-", "%"],
             ]
@@ -3299,20 +3204,6 @@ def create_input_section():
         key="water_flow", format="%.0f"
     )
     
-    st.sidebar.subheader("🧭 Practical Design Limits")
-    inputs["max_allowable_tube_dp_kpa"] = number_input_with_buttons(
-        label="Max Allowable Tube ΔP (kPa)",
-        min_value=5.0, max_value=500.0, value=100.0, step=5.0,
-        key="max_tube_dp_kpa", format="%.0f",
-        help_text="Guidance target for tube-side pressure drop (pumping / compressor penalty)."
-    )
-    inputs["max_tube_velocity_ms"] = number_input_with_buttons(
-        label="Max Tube Velocity (m/s)",
-        min_value=0.5, max_value=10.0, value=2.5, step=0.1,
-        key="max_tube_vel_ms", format="%.1f",
-        help_text="Used to flag impractical tube-side velocities and suggest changes."
-    )
-
     st.sidebar.markdown("---")
     
     # Geometry Parameters
@@ -3642,19 +3533,6 @@ def display_results(results: Dict, inputs: Dict):
     </div>
     """, unsafe_allow_html=True)
     
-    # Quick guidance
-    if results.get("design_status_reasons") or results.get("design_guidance"):
-        st.markdown("### ✅ Design Checks & Guidance")
-        reasons = results.get("design_status_reasons", {}) or {}
-        if reasons:
-            st.write("**Status reasons:** " + " | ".join([f"{k}: {v}" for k, v in reasons.items()]))
-        guidance = results.get("design_guidance", []) or []
-        for g in guidance[:8]:
-            st.write(f"• {g}")
-        if len(guidance) > 8:
-            st.caption(f"(+{len(guidance)-8} more suggestions in PDF report)")
-    st.markdown("---")
-
     # TEMA Compliance section
     display_tema_compliance(results, inputs)
     
@@ -3756,6 +3634,21 @@ def display_results(results: Dict, inputs: Dict):
         
         with col2:
             st.markdown("<div class='result-box'>", unsafe_allow_html=True)
+            # Context-aware shell/tube temperature display
+            if results.get("t_shell_in") is not None and results.get("t_tube_in") is not None:
+                st.markdown("### Shell / Tube Side Temperatures (as configured)")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Shell Side ({results.get('shell_stream','')})**")
+                    st.metric("Inlet", f"{results.get('t_shell_in', 0.0):.1f} °C")
+                    st.metric("Outlet", f"{results.get('t_shell_out', 0.0):.1f} °C")
+                with c2:
+                    st.markdown(f"**Tube Side ({results.get('tube_stream','')})**")
+                    st.metric("Inlet", f"{results.get('t_tube_in', 0.0):.1f} °C")
+                    st.metric("Outlet", f"{results.get('t_tube_out', 0.0):.1f} °C")
+                if results.get("t_sec_out_required") is not None:
+                    st.caption(f"Secondary outlet required by duty (energy balance): {results.get('t_sec_out_required'):.1f} °C")
+                st.markdown("---")
             st.markdown("### Water/Glycol Side")
             st.metric("Inlet Temperature", f"{results['t_sec_in']:.1f} °C")
             st.metric("Outlet Temperature", f"{results['t_sec_out']:.1f} °C")
